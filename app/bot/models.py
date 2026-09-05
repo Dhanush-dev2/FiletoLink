@@ -16,11 +16,22 @@ class User:
 
 
 @dataclass(frozen=True)
+class Document:
+    """A file attached to a message (Telegram 'document')."""
+
+    file_id: str
+    file_name: str | None = None
+    file_size: int | None = None  # bytes
+    mime_type: str | None = None
+
+
+@dataclass(frozen=True)
 class Message:
     message_id: int
     text: str | None = None
     user: User | None = None
-    # `document` (file info) will be added when file receiving lands.
+    document: Document | None = None
+    date: int | None = None  # Unix epoch seconds, Telegram-style
 
 
 @dataclass(frozen=True)

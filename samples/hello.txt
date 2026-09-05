@@ -1,0 +1,4 @@
+Hello from the File-to-Link Bot sample!
+
+Use this file to try out the mock file receiving:
+    send samples/hello.txt

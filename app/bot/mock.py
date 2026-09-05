@@ -11,22 +11,89 @@ Usage (interactive chat):
     or, via the project entry point:
 
     python run.py
+
+In the chat loop:
+    /start, /help          — bot commands
+    any text               — a plain user message
+    send <path>            — simulate sending a local file to the bot
 """
+import base64
+import itertools
+import mimetypes
+import os
+import time
+
 from ..config import get_settings
 from ..utils.console import ensure_utf8_stdout
 from .handlers import handle_update
-from .models import Message, Update, User
+from .models import Document, Message, Update, User
 
 _BOT_FACE = "🤖"
 
+# Simulated sender for the mock chat loop.
+MOCK_USER = User(id=123456789, username="mock_user", first_name="Mock")
 
-def reply_to(text: str, user: User | None = None) -> str:
-    """Route one user message through the bot and return the reply text."""
+_message_ids = itertools.count(1)
+
+
+def _fake_file_id() -> str:
+    """A Telegram-like file id (mock only; random on every call)."""
+    raw = base64.urlsafe_b64encode(os.urandom(18)).decode().rstrip("=")
+    return f"BQAD{raw}"
+
+
+def reply_to(text: str, user: User = MOCK_USER) -> str:
+    """Route one plain user message through the bot and return the reply."""
     update = Update(
         update_id=1,
-        message=Message(message_id=1, text=text, user=user),
+        message=Message(
+            message_id=next(_message_ids),
+            text=text,
+            user=user,
+            date=int(time.time()),
+        ),
     )
     return handle_update(update)
+
+
+def local_file_document(path: str) -> Document:
+    """Build a normalized :class:`Document` from a local file path.
+
+    Reads the file's name and size, guesses the MIME type from the
+    extension, and fabricates a mock file id (real Telegram file ids are
+    only available once the real integration lands).
+    """
+    file_name = os.path.basename(path)
+    file_size = os.path.getsize(path)
+    mime_type, _ = mimetypes.guess_type(path)
+    return Document(
+        file_id=_fake_file_id(),
+        file_name=file_name,
+        file_size=file_size,
+        mime_type=mime_type,
+    )
+
+
+def send_local_file(path: str, user: User = MOCK_USER) -> str:
+    """Simulate a user sending a local file; return the bot's reply.
+
+    Raises :class:`FileNotFoundError` (or another OSError) when the path
+    cannot be read — the REPL turns that into a friendly message.
+    """
+    update = Update(
+        update_id=1,
+        message=Message(
+            message_id=next(_message_ids),
+            user=user,
+            document=local_file_document(path),
+            date=int(time.time()),
+        ),
+    )
+    return handle_update(update)
+
+
+def _print_reply(reply: str) -> None:
+    print(f"{_BOT_FACE} {reply}\n")
 
 
 def repl() -> None:
@@ -34,7 +101,8 @@ def repl() -> None:
     ensure_utf8_stdout()
     settings = get_settings()
     print(f"{_BOT_FACE} {settings.bot_username} — mock Telegram bot (mode: {settings.bot_mode})")
-    print("No bot token required. Type /start, /help, or any message.")
+    print("No bot token required. Type /start, /help, any message, or:")
+    print("  send <path>   — simulate sending a local file to the bot")
     print("Type 'quit' or press Ctrl+C to exit.\n")
 
     while True:
@@ -48,7 +116,22 @@ def repl() -> None:
         if line.lower() in {"quit", "exit", "q"}:
             print(f"{_BOT_FACE} Bye!")
             return
-        print(f"{_BOT_FACE} {reply_to(line)}\n")
+
+        head, _, rest = line.partition(" ")
+        if head.lower() == "send":
+            path = rest.strip().strip('"')
+            if not path:
+                print(f"{_BOT_FACE} 📎 Usage: send <path> — simulate sending a file.\n")
+                continue
+            try:
+                _print_reply(send_local_file(path))
+            except FileNotFoundError:
+                print(f"{_BOT_FACE} ❌ No such file: {path}\n")
+            except OSError as exc:
+                print(f"{_BOT_FACE} ❌ Could not read {path}: {exc}\n")
+            continue
+
+        _print_reply(reply_to(line))
 
 
 if __name__ == "__main__":

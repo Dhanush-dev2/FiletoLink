@@ -3,11 +3,12 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 1 (bot scaffold, mock transport).**
+> **Status — Milestone 2 (file receiving, mock transport).**
 > The bot runs locally on a **mock Telegram integration**: no `BOT_TOKEN`, no
-> external services, ₹0 cost. `/start` and `/help` work today. File receiving,
-> the database, link generation, and the download endpoint arrive in later
-> phases.
+> external services, ₹0 cost. `/start` and `/help` work, and sending a file
+> yields an acknowledgment with its metadata (file id, name, size, MIME type,
+> message id, user id, timestamp). The database, link generation, and the
+> download endpoint arrive in later phases.
 
 ## What it does
 
@@ -109,7 +110,8 @@ You get an interactive chat loop simulating a Telegram client:
 ```
 ▶ Starting file_to_link_bot in MOCK mode
 🤖 file_to_link_bot — mock Telegram bot (mode: mock)
-No bot token required. Type /start, /help, or any message.
+No bot token required. Type /start, /help, any message, or:
+  send <path>   — simulate sending a local file to the bot
 Type 'quit' or press Ctrl+C to exit.
 
 You: /start
@@ -120,6 +122,41 @@ You: /help
 ```
 
 Type `quit` or press `Ctrl+C` to exit.
+
+### Simulating a file send
+
+Use the bundled sample file:
+
+```
+You: send samples/hello.txt
+🤖 ✅ File received
+
+📁 hello.txt
+📦 117 B
+🏷️ Type: text/plain
+
+🆔 File ID: BQAD9jTeavgvVtD5oU_WF5ZEbvtM
+#️⃣ Message ID: 1
+👤 User ID: 123456789
+🕒 Received: 2026-09-05 15:48:38 UTC
+```
+
+`send <path>` reads the local file for its name/size, guesses the MIME type
+from the extension, and fabricates a mock Telegram file id. Missing or
+unreadable files get a friendly error.
+
+## Testing
+
+```bash
+pytest
+```
+
+The tests cover the bot handlers (`/start`, `/help`, unknown commands, plain
+text, empty/absent messages) and file receiving (full metadata display,
+missing name/size/MIME type/timestamp, captions with documents, size
+formatting, mock file-document extraction, and missing-file errors). Because
+handlers are transport-free, the same tests will pass once the real Telegram
+integration lands.
 
 ## Testing
 
@@ -133,15 +170,16 @@ the same tests will pass once the real Telegram integration lands.
 
 ## How the mock works
 
-`app/bot/mock.py` builds a normalized `Update` from each line you type and
-feeds it into `handle_update()` — the exact function the real bot will call.
-There is no network, no token, and nothing to leak.
+`app/bot/mock.py` builds normalized `Update` objects — from text lines or
+from local files via `send <path>` — and feeds them into `handle_update()`,
+the exact function the real bot will call. There is no network, no token,
+and nothing to leak.
 
 ## Milestone plan (phase-by-phase)
 
 1. ✅ Bot scaffold + mock transport (`/start`, `/help`)
-2. ⏳ File receiving (documents) + metadata extraction
-3. SQLite database layer
+2. ✅ File receiving (documents) + metadata extraction
+3. ⏳ SQLite database layer
 4. Unique public IDs
 5. Link generation
 6. Download endpoint
@@ -160,7 +198,8 @@ be connected after the core project is finalized.
 
 ## Limitations (current milestone)
 
-- Mock transport only — no real Telegram traffic.
-- Text messages only; files not yet received.
+- Mock transport only — no real Telegram traffic; mock file ids are
+  fabricated locally.
+- Files are acknowledged with metadata only — no storage, no public links.
 - No database, links, or download endpoint yet.
 - No rate limiting or link management yet.
