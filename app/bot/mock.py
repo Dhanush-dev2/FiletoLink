@@ -79,13 +79,15 @@ def send_local_file(
     path: str,
     user: User = MOCK_USER,
     file_service: FileService | None = None,
+    base_url: str | None = None,
 ) -> str:
     """Simulate a user sending a local file; return the bot's reply.
 
     When no ``file_service`` is given, an ephemeral in-memory database is
-    used (tests). Raises :class:`FileNotFoundError` (or another OSError)
-    when the path cannot be read — the REPL turns that into a friendly
-    message.
+    used (tests). ``base_url`` overrides the configured BASE_URL in the
+    generated download link. Raises :class:`FileNotFoundError` (or another
+    OSError) when the path cannot be read — the REPL turns that into a
+    friendly message.
     """
     if file_service is None:
         file_service = make_file_service(":memory:")
@@ -98,7 +100,7 @@ def send_local_file(
             date=int(time.time()),
         ),
     )
-    return handle_update(update, file_service=file_service)
+    return handle_update(update, file_service=file_service, base_url=base_url)
 
 
 def _print_reply(reply: str) -> None:
@@ -136,7 +138,11 @@ def repl() -> None:
                 print(f"{_BOT_FACE} 📎 Usage: send <path> — simulate sending a file.\n")
                 continue
             try:
-                _print_reply(send_local_file(path, file_service=file_service))
+                _print_reply(
+                    send_local_file(
+                        path, file_service=file_service, base_url=settings.base_url
+                    )
+                )
             except FileNotFoundError:
                 print(f"{_BOT_FACE} ❌ No such file: {path}\n")
             except OSError as exc:

@@ -6,7 +6,9 @@ future real Telegram integration needs to know how the other works.
 """
 from datetime import datetime, timezone
 
+from ..config import get_settings
 from ..services.files import FileService
+from ..utils.urls import generate_file_url
 from .models import Message, Update
 
 BOT_NAME = "File-to-Link Bot"
@@ -63,12 +65,16 @@ def _greeting_name(update: Update) -> str:
     return ""
 
 
-def _handle_document(message: Message, file_service: FileService | None = None) -> str:
-    """Acknowledge a received file and display its metadata.
+def _handle_document(
+    message: Message,
+    file_service: FileService | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Acknowledge a received file and display its metadata + download URL.
 
     When a ``file_service`` is provided the metadata is persisted to SQLite
-    and the reply notes the record id. Public link generation is
-    intentionally NOT implemented yet.
+    and the reply notes the record id, public id, and generated download
+    URL. The URL is generated but does not serve files yet.
     """
     doc = message.document
     lines = [
@@ -90,16 +96,24 @@ def _handle_document(message: Message, file_service: FileService | None = None) 
         record = file_service.save_document(message)
         lines.append(f"💾 Stored in database (record #{record.id})")
         if record.public_id is not None:
-            # The public link (Phase 5) will be built from this id.
             lines.append(f"🔑 Public ID: {record.public_id}")
+            url = generate_file_url(base_url or get_settings().base_url, record.public_id)
+            lines.append("")
+            lines.append("🔗 Download:")
+            lines.append(url)
     return "\n".join(lines)
 
 
-def handle_update(update: Update, file_service: FileService | None = None) -> str:
+def handle_update(
+    update: Update,
+    file_service: FileService | None = None,
+    base_url: str | None = None,
+) -> str:
     """Route one update through the bot and return the reply text.
 
     ``file_service`` is optional: when provided, received files are
-    persisted to SQLite.
+    persisted to SQLite. ``base_url`` overrides the configured BASE_URL
+    used for the generated download link.
     """
     message: Message | None = update.message
     if message is None:
@@ -108,7 +122,7 @@ def handle_update(update: Update, file_service: FileService | None = None) -> st
             "Send /help to see what I can do."
         )
     if message.document is not None:
-        return _handle_document(message, file_service)
+        return _handle_document(message, file_service, base_url)
     if message.text is None:
         return (
             "🤔 I can only read text messages and files for now. "

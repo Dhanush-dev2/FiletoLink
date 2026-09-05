@@ -3,12 +3,13 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 4 (file receiving + SQLite + public IDs, mock transport).**
+> **Status — Milestone 5 (file receiving + SQLite + public links, mock transport).**
 > The bot runs locally on a **mock Telegram integration**: no `BOT_TOKEN`, no
 > external services, ₹0 cost. `/start` and `/help` work; sending a file yields
-> an acknowledgment with its metadata, persists it to **SQLite**, and assigns
-> a secure, unpredictable **public id**. Link generation (URLs) and the
-> download endpoint arrive in later phases.
+> an acknowledgment with its metadata, persists it to **SQLite**, assigns a
+> secure **public id**, and replies with a generated **download URL**
+> (`{BASE_URL}/f/{public_id}`). The URL does not serve the file yet — the
+> download endpoint arrives in the next phase.
 
 ## What it does
 
@@ -89,7 +90,7 @@ Never commit it.
 | `BOT_TOKEN`    | *(unset)*              | Real bot token (later phase). Not required now |
 | `BOT_USERNAME` | `file_to_link_bot`     | Placeholder bot username                       |
 | `BOT_MODE`     | `mock` (auto)          | `mock` or `real` (later phase)                 |
-| `BASE_URL`     | `http://localhost:8000`| Public base URL for generated links (Phase 5+) || `HOST`     | `127.0.0.1`            | API host (Phase 5+)                            |
+| `BASE_URL`     | `http://localhost:8000`| Base URL for generated links (`{BASE_URL}/f/{id}`) || `HOST`     | `127.0.0.1`            | API host (Phase 5+)                            |
 | `PORT`     | `8000`                 | API port (Phase 5+)                            |
 | `DATABASE_PATH` | `data/files.db`  | SQLite database file (relative to project root) |
 
@@ -141,7 +142,13 @@ You: send samples/hello.txt
 🕒 Received: 2026-09-05 15:48:38 UTC
 💾 Stored in database (record #1)
 🔑 Public ID: t9obSSQq
+
+🔗 Download:
+http://localhost:8000/f/t9obSSQq
 ```
+
+The URL is generated from the configured `BASE_URL` — it does **not** serve
+the file yet (that is the download endpoint, a later phase).
 
 `send <path>` reads the local file for its name/size, guesses the MIME type
 from the extension, and fabricates a mock Telegram file id. The metadata is
@@ -198,7 +205,24 @@ the same tests will pass once the real Telegram integration lands.
 - The UNIQUE index on `public_id` is the source of truth: on the
   astronomically unlikely collision, `FileService` generates a fresh id and
   retries (bounded, 10 attempts) — another file's id is never overwritten.
-- The public id is what later phases turn into a `/f/<id>` download link.
+
+## Public links (URLs)
+
+- **Format**: `{BASE_URL}/f/{public_id}` — e.g.
+  `http://localhost:8000/f/t9obSSQq`. The public id is used unchanged;
+  internal row ids and Telegram file ids are never exposed.
+- **`BASE_URL`** comes from the environment (`.env`), defaulting to
+  `http://localhost:8000` for local development. It must include a scheme;
+  trailing slashes and surrounding whitespace are tolerated. See the
+  environment table below.
+- **Construction** lives in `app/utils/urls.py` (`generate_file_url`),
+  kept out of the repository, transports, and SQL. Inputs are validated
+  (public id format, base URL scheme).
+- **Flow**: `FileService.save_document()` → record with public id →
+  `generate_file_url(base_url, public_id)` → handler reply.
+- ⚠️ The generated URL is display-only at this phase: visiting it does not
+  serve the file yet. The `GET /f/{public_id}` download endpoint is the
+  next phase.
 
 ## How the mock works
 
@@ -213,8 +237,8 @@ and nothing to leak.
 2. ✅ File receiving (documents) + metadata extraction
 3. ✅ SQLite database layer
 4. ✅ Unique public IDs
-5. ⏳ Link generation
-6. Download endpoint
+5. ✅ Link generation
+6. ⏳ Download endpoint
 7. Telegram Local Bot API Server (large files)
 8. Streaming
 9. HTTP Range Requests
@@ -232,6 +256,7 @@ be connected after the core project is finalized.
 
 - Mock transport only — no real Telegram traffic; mock file ids are
   fabricated locally.
-- Files are stored as metadata + public id only; no public **links** are
-  generated yet (that is Phase 5) and no download endpoint exists.
-- No expiration handling, link management, or rate limiting yet.
+- Download URLs are **generated but do not serve files yet** — there is no
+  `GET /f/{public_id}` endpoint until the next phase.
+- No expiration handling, link management, download counters, or rate
+  limiting yet.
