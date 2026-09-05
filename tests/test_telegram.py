@@ -116,6 +116,7 @@ def make_record(source_path: str | None, work_dir: str) -> FileRecord:
         created_at=1_700_000_000,
         expires_at=None,
         download_count=0,
+        max_downloads=None,
         status="active",
         source_path=source_path,
     )
@@ -313,10 +314,11 @@ def test_build_application_registers_handlers():
         base_url="http://127.0.0.1:8081/bot",
     )
     handlers = [h for group in app.handlers.values() for h in group]
-    assert len(handlers) == 3  # /start, /help, message handler
+    # /start, /help, /delete, /info + the message handler.
+    assert len(handlers) == 5
     from telegram.ext import CommandHandler, MessageHandler
 
-    assert sum(isinstance(h, CommandHandler) for h in handlers) == 2
+    assert sum(isinstance(h, CommandHandler) for h in handlers) == 4
     assert sum(isinstance(h, MessageHandler) for h in handlers) == 1
 
 

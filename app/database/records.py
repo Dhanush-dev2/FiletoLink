@@ -8,6 +8,8 @@ class FileRecord:
 
     ``public_id`` is NULL until link generation lands (Phase 4).
     ``expires_at`` NULL means the link never expires.
+    ``max_downloads`` NULL means an unlimited number of downloads; ``0``
+    means no downloads at all; ``N`` means at most ``N`` successful GETs.
     ``status`` is one of ``active`` / ``deleted`` / ``expired``.
     Timestamps are Unix epoch seconds (UTC).
     """
@@ -23,5 +25,6 @@ class FileRecord:
     created_at: int
     expires_at: int | None
     download_count: int
+    max_downloads: int | None
     status: str
     source_path: str | None

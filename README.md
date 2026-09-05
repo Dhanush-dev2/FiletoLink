@@ -3,15 +3,16 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 8 (real Telegram transport ready, mock still default).**
-> Everything runs locally at ₹0 cost. **Mock mode** (no `BOT_TOKEN`, no
-> network) remains the default: `python run.py` gives you a chat loop,
-> sending files yields metadata → SQLite → public id → working download URL
-> via `python run.py --api`. A **real Telegram transport** is now implemented
-> (`python run.py --telegram`): python-telegram-bot in `local_mode` against a
-> self-hosted Local Bot API Server (`--local`), normalizing updates into the
-> same pipeline. The real end-to-end run requires the Local Bot API Server +
-> a real bot to be set up (see below).
+> **Status — Milestone 10 (link management: expiration, download limits,
+> deletion, owner-only /delete and /info).** Everything runs locally at ₹0
+> cost. **Mock mode** (no `BOT_TOKEN`, no network) remains the default:
+> `python run.py` gives you a chat loop, sending files yields metadata →
+> SQLite → public id → working download URL via `python run.py --api`. A
+> **real Telegram transport** is implemented (`python run.py --telegram`):
+> python-telegram-bot in `local_mode` against a self-hosted Local Bot API
+> Server (`--local`), normalizing updates into the same pipeline. The real
+> end-to-end run requires the Local Bot API Server + a real bot to be set up
+> (see below).
 
 ## What it does
 
@@ -223,6 +224,78 @@ Notes:
   GETs count once; HEAD never counts).
 - The file source is abstracted (`app/services/file_sources.py`): local
   paths (mock) or the Local Bot API Server's work directory (real mode).
+- Lifecycle checks take precedence over range handling: an expired, deleted,
+  or exhausted link returns `410 Gone` even when a `Range` header is sent.
+
+## Link management (expiration, limits, deletion)
+
+Every stored file link can carry two optional settings: an expiration time
+and a maximum number of downloads. Both are stored per record (`expires_at`,
+`max_downloads`) and are optional — when omitted the link lives forever with
+no download limit.
+
+### Expiration
+
+- `expires_at` is a Unix timestamp (UTC). `NULL` means the link never
+  expires; a future timestamp means active; a past timestamp means expired.
+- Expiration is **lazy**: no background worker runs. The first request after
+  the deadline marks the link `expired` and returns `410 Gone` — no bytes are
+  served and the download counter is not incremented.
+
+### Maximum download counts
+
+- `max_downloads = NULL` → unlimited downloads.
+- `max_downloads = 0` → no downloads allowed (always `410`).
+- `max_downloads = N` → at most `N` successful GET requests.
+- Each GET (including a range GET) consumes **exactly one** download slot;
+  `HEAD` consumes none.
+- The slot is reserved with a **single atomic conditional UPDATE**, so
+  concurrent requests can never exceed the limit (no check-then-act race).
+  A request that finds the limit reached returns `410` without serving bytes
+  or incrementing the counter.
+- The GET that consumes the final permitted slot immediately transitions the
+  link `active → expired` in the same atomic operation, so `/info` shows the
+  real state right away. If a reserved slot cannot be served (missing source
+  file, unsatisfiable range), the slot is released and the transition is
+  rolled back, so failed requests do not burn a download.
+
+### Deletion
+
+- Deleting a link sets `status = 'deleted'` and prevents all future
+  downloads (`410 Gone`). Metadata is preserved; physical source files are
+  left untouched in this phase.
+- Deletion is idempotent and terminal: a deleted link is never reactivated.
+
+### Lifecycle statuses
+
+`active` → `deleted` (owner deletes) or `active` → `expired` (time passed or
+final download consumed). No other transitions exist: deleted or expired
+links stay that way.
+
+### /delete and /info (owner-only)
+
+```
+/delete <public_id>   permanently disable one of your links
+/info   <public_id>   show status, downloads, and expiration
+```
+
+- **Ownership is enforced server-side**: the requesting Telegram user id is
+  compared against the record's stored `user_id`. Only the owner can delete
+  or inspect a link.
+- `/delete` is idempotent: deleting an already-deleted link gives a friendly
+  "already deleted" reply.
+- `/info` shows the file name, size, status, download count, max downloads,
+  expiration, and the public URL — and never exposes `telegram_file_id`,
+  `source_path`, database ids, or any secrets.
+- Non-owner and unknown-id requests get a generic reply that reveals no
+  private metadata.
+
+### Creating links with expiration/limits
+
+The storage layer accepts optional `expires_at` and `max_downloads` when a
+file is saved (`FileService.save_document` / `FileRepository.create`);
+omitting them creates a permanent, unlimited link. No interactive
+configuration flow is added in this phase.
 
 ### HTTP Range Requests
 
@@ -300,9 +373,12 @@ stored record id. Missing or unreadable files get a friendly error.
 - **Files table**: `id`, `public_id` (UNIQUE, filled in on save),
   `telegram_file_id`, `telegram_message_id`, `user_id`, `file_name`,
   `file_size`, `mime_type`, `created_at` (epoch seconds), `expires_at`
-  (NULL = never), `download_count` (default 0), `status`
-  (`active`/`deleted`/`expired`, default `active`). Indexed on `public_id`,
-  `telegram_file_id`, and `status`.
+  (NULL = never), `download_count` (default 0), `max_downloads` (NULL =
+  unlimited), `status` (`active`/`deleted`/`expired`, default `active`).
+  Indexed on `public_id`, `telegram_file_id`, and `status`.
+- **Migration**: pre-existing databases (without `max_downloads`) get the
+  column added automatically on startup; existing records receive
+  `max_downloads = NULL` (unlimited) and are otherwise untouched.
 - **Layering**: `app/database/` owns all SQL (connection + schema +
   repository). `app/services/files.py` turns normalized file messages into
   stored records. Bot handlers and the mock transport never touch raw SQL.
@@ -328,8 +404,12 @@ schema migration), and the real Telegram transport (PTB update → normalized
 models incl. missing mime/name/captions, TelegramFileSource containment,
 symlink/traversal rejection, config validation, application wiring, and the
 simulated document flow storing + serving bytes — all offline, no token or
-server needed). Because handlers are transport-free, the same tests pass
-in both mock and real modes.
+server needed), and link management (expiration, download limits incl. a
+real concurrency test with >N parallel GETs against max_downloads=N,
+deletion idempotency, owner-only /delete and /info, metadata privacy,
+unsatisfiable ranges not consuming slots, and the max_downloads database
+migration keeping existing records intact). Because handlers are
+transport-free, the same tests pass in both mock and real modes.
 
 ## Public IDs
 
@@ -379,7 +459,7 @@ same normalization for live Telegram updates, so both transports share
 7. ✅ Telegram Local Bot API Server (research + real transport wiring)
 8. ✅ Streaming (chunked, bounded reads)
 9. ✅ HTTP Range Requests
-10. Link management (expiration, counters, deletion)
+10. ✅ Link management (expiration, counters, deletion, /delete, /info)
 11. Security (rate limiting, validation)
 12. Error handling
 13. Logging
@@ -398,4 +478,6 @@ be connected after the core project is finalized.
 - Mock transport remains the default and is fully functional.
 - Single byte ranges only (no multipart/byteranges); malformed/unsatisfiable
   ranges return 416.
-- No expiration handling, link management, or rate limiting yet.
+- Expiration, download limits, and deletion are per-link database settings;
+  there is no rate limiting, signed-URL, or per-user authentication beyond
+  the owner check on /delete and /info.

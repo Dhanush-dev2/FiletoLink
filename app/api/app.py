@@ -5,20 +5,30 @@ the repository, and id/URL generation. The endpoint only talks to the
 repository (for the record) and a :class:`FileSource` (for the bytes);
 it contains no raw SQL.
 
+Link lifecycle (Phase 10):
+
+- expiration (``expires_at`` in the past) → lazy ``expired`` status, ``410``
+- deleted (``status = 'deleted'``) → ``410``
+- exhausted (``download_count >= max_downloads``) → ``410``; exhausted
+  links are terminalized with the existing ``expired`` status
+- one download slot is reserved per GET with a single atomic conditional
+  UPDATE, so concurrent requests can never exceed ``max_downloads``
+- ``HEAD`` returns metadata without reserving a slot
+
 Byte-range behavior (RFC 7233, single range):
 
 - no Range header → ``200`` with the full file + ``Accept-Ranges: bytes``
 - valid ``Range: bytes=...`` → ``206`` with ``Content-Range`` and only the
   requested bytes (seek + bounded reads, never a whole-file read)
 - malformed/unsatisfiable ranges → ``416`` with ``Content-Range: bytes */N``
-- ``HEAD`` is served by the same route (Starlette adds HEAD to GET routes)
-  with identical metadata headers, no body, and no download counter change
+- a valid range GET consumes exactly one download slot
 
 Run it with:
     python run.py --api
     # or: uvicorn --factory app.api.app:create_app --host 127.0.0.1 --port 8000
 """
 import os
+import time
 from typing import BinaryIO, Iterator
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -205,6 +215,7 @@ def create_app(
         # Shared by GET and HEAD; the branch below only alters
         # headers/body/counter.
         is_head = request.method == "HEAD"
+        now = int(time.time())
 
         # 1. Validate the public id.
         if not is_valid_public_id(public_id):
@@ -215,22 +226,67 @@ def create_app(
         if record is None:
             return _error(404, "File not found", is_head=is_head)
 
-        # 3. Only active records are downloadable.
+        # 3. Lazy expiration: a link whose expires_at has passed is
+        #    terminalized on first access (no background worker needed).
+        if record.expires_at is not None and record.expires_at <= now:
+            repository.expire_if_due(record.id, now)
+            return _error(410, "This link has expired", is_head=is_head)
+
+        # 4. Only active records are downloadable (deleted / expired).
         if record.status != "active":
             return _error(
                 410, "This link is no longer available", is_head=is_head
             )
 
-        # 4. HEAD: metadata headers only — never counts as a download.
+        # 5. HEAD: metadata headers only — never reserves a slot. Still,
+        #    a link whose count already reached the limit (e.g.
+        #    max_downloads = 0) is terminal: detect it via the derived
+        #    condition and terminalize it like GET would.
         if is_head:
+            if (
+                record.max_downloads is not None
+                and record.download_count >= record.max_downloads
+            ):
+                repository.mark_exhausted(record.id)
+                return _error(
+                    410, "This link is no longer available", is_head=is_head
+                )
             return _head_response(record)
 
-        # 5. One logical download request → one counter increment
-        #    (range GETs and streamed chunks do not multiply it).
-        repository.update(record.id, download_count=record.download_count + 1)
+        # 6. Atomically reserve one download slot. The single conditional
+        #    UPDATE checks status, expiration, and the download limit, so
+        #    concurrent requests cannot exceed max_downloads (no
+        #    check-then-act race). Range GETs count as exactly one slot.
+        if not repository.reserve_download_slot(record.id, now):
+            current = repository.get_by_id(record.id)
+            if (
+                current is not None
+                and current.expires_at is not None
+                and current.expires_at <= now
+            ):
+                repository.expire_if_due(current.id, now)
+                return _error(410, "This link has expired", is_head=is_head)
+            if current is not None and current.status == "active":
+                # Active but unreservable ⇒ its download limit is exhausted;
+                # terminalize it with the existing 'expired' status.
+                repository.mark_exhausted(record.id)
+            return _error(
+                410, "This link is no longer available", is_head=is_head
+            )
 
-        # 6. Resolve the bytes and serve them (full or ranged).
-        return _get_response(record, file_source, request.headers.get("range"))
+        # 7. Serve the bytes. If nothing can be served (missing source →
+        #    404, unsatisfiable range → 416) the reserved slot is released
+        #    so failed requests do not burn a download.
+        try:
+            response = _get_response(
+                record, file_source, request.headers.get("range")
+            )
+        except HTTPException:
+            repository.release_download_slot(record.id)
+            raise
+        if response.status_code == 416:
+            repository.release_download_slot(record.id)
+        return response
 
     @app.get("/f/{public_id}")
     def download(public_id: str, request: Request) -> Response:

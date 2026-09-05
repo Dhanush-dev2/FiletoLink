@@ -27,8 +27,18 @@ class FileService:
     def __init__(self, repository: FileRepository) -> None:
         self.repository = repository
 
-    def save_document(self, message: Message) -> FileRecord:
+    def save_document(
+        self,
+        message: Message,
+        *,
+        expires_at: int | None = None,
+        max_downloads: int | None = None,
+    ) -> FileRecord:
         """Persist a file message and return the stored record.
+
+        ``expires_at`` (NULL = never) and ``max_downloads`` (NULL =
+        unlimited) are optional link-management settings; when omitted the
+        link lives forever with no download limit.
 
         Flow: save metadata → generate public id → store it (retrying on
         the unlikely UNIQUE collision) → return the record.
@@ -45,8 +55,25 @@ class FileService:
             mime_type=doc.mime_type,
             created_at=message.date,
             source_path=message.source_path,
+            expires_at=expires_at,
+            max_downloads=max_downloads,
         )
         return self._assign_public_id(record.id)
+
+    def get_link(self, public_id: str) -> FileRecord | None:
+        """Retrieve a record by its public id (used by /info and /delete)."""
+        return self.repository.get_by_public_id(public_id)
+
+    def delete_link(self, public_id: str) -> FileRecord | None:
+        """Idempotently mark a link deleted; returns the record or None.
+
+        Deletion only flips ``status`` to ``deleted`` — metadata is
+        preserved and the physical source file is left untouched.
+        """
+        record = self.repository.get_by_public_id(public_id)
+        if record is None:
+            return None
+        return self.repository.set_status(record.id, "deleted")
 
     def _assign_public_id(self, record_id: int) -> FileRecord:
         """Attach a fresh public id, retrying if it already exists.

@@ -132,9 +132,14 @@ async def handle_message_update(
 async def handle_command_update(
     update: telegram.Update,
     context: telegram.ext.ContextTypes.DEFAULT_TYPE,
+    file_service: FileService | None = None,
 ) -> None:
-    """Route /start and /help through the existing normalized handler."""
-    reply = handle_update(normalize_update(update))
+    """Route bot commands through the existing normalized handler.
+
+    /start and /help need no service; /delete and /info receive the
+    file service so ownership checks can run against the database.
+    """
+    reply = handle_update(normalize_update(update), file_service=file_service)
     await update.effective_message.reply_text(reply)
 
 
@@ -171,6 +176,22 @@ def build_application(
 
     application.add_handler(CommandHandler("start", handle_command_update))
     application.add_handler(CommandHandler("help", handle_command_update))
+    application.add_handler(
+        CommandHandler(
+            "delete",
+            lambda update, context: handle_command_update(
+                update, context, file_service
+            ),
+        )
+    )
+    application.add_handler(
+        CommandHandler(
+            "info",
+            lambda update, context: handle_command_update(
+                update, context, file_service
+            ),
+        )
+    )
     application.add_handler(
         MessageHandler(
             filters.TEXT | filters.Document.ALL,

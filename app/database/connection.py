@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS files (
     created_at INTEGER NOT NULL,
     expires_at INTEGER,
     download_count INTEGER NOT NULL DEFAULT 0,
+    max_downloads INTEGER,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'deleted', 'expired')),
     source_path TEXT
@@ -74,6 +75,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     """
     conn.executescript(SCHEMA)
     _add_column_if_missing(conn, "files", "source_path", "TEXT")
+    _add_column_if_missing(conn, "files", "max_downloads", "INTEGER")
     conn.commit()
 
 
