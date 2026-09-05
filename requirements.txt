@@ -2,10 +2,8 @@
 python-dotenv>=1.0,<2.0
 fastapi>=0.115,<1.0
 uvicorn>=0.30,<1.0
+python-telegram-bot>=21.6,<23.0
 
 # Testing
 pytest>=8.0,<9.0
 httpx>=0.27,<1.0   # required by fastapi TestClient
-
-# --- Coming in later phases (installed when used) ---
-# python-telegram-bot  # real Telegram integration (Phase 1 continuation)

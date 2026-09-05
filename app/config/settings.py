@@ -41,7 +41,7 @@ class Settings:
     def __init__(self) -> None:
         self.bot_token: str | None = _get_optional("BOT_TOKEN")
         self.bot_username: str = _get_optional("BOT_USERNAME") or "file_to_link_bot"
-        # bot_mode: "mock" (default, no token required) or "real" (later phase).
+        # bot_mode: "mock" (default, no token required) or "real".
         self.bot_mode: str = (
             _get_optional("BOT_MODE") or _default_mode(self.bot_token)
         ).lower()
@@ -49,6 +49,13 @@ class Settings:
         self.host: str = _get_optional("HOST") or "127.0.0.1"
         self.port: int = _get_int("PORT", 8000)
         self.database_path: str = self._resolve_database_path()
+        # Real Telegram (BOT_MODE=real): credentials and Local Bot API Server.
+        self.telegram_api_id: str | None = _get_optional("TELEGRAM_API_ID")
+        self.telegram_api_hash: str | None = _get_optional("TELEGRAM_API_HASH")
+        self.local_bot_api_url: str = (
+            _get_optional("LOCAL_BOT_API_URL") or "http://127.0.0.1:8081"
+        ).rstrip("/")
+        self.telegram_bot_work_dir: str = self._resolve_work_dir()
 
     def _resolve_database_path(self) -> str:
         """SQLite location: DATABASE_PATH env var or data/files.db under the
@@ -56,6 +63,18 @@ class Settings:
         raw = _get_optional("DATABASE_PATH")
         if not raw:
             return str(PROJECT_ROOT / "data" / "files.db")
+        path = Path(raw)
+        return str(path if path.is_absolute() else PROJECT_ROOT / path)
+
+    def _resolve_work_dir(self) -> str:
+        """Local Bot API Server working directory (--dir).
+
+        TELEGRAM_BOT_WORK_DIR env var, or telegram_bot_data/ under the
+        project root. Relative paths resolve against the project root.
+        """
+        raw = _get_optional("TELEGRAM_BOT_WORK_DIR")
+        if not raw:
+            return str(PROJECT_ROOT / "telegram_bot_data")
         path = Path(raw)
         return str(path if path.is_absolute() else PROJECT_ROOT / path)
 

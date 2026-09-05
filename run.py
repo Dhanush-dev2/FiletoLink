@@ -22,8 +22,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--api",
         action="store_true",
-        help="run the FastAPI download server (GET /f/{public_id}) "
-        "instead of the mock Telegram bot",
+        help="run the FastAPI download server (GET /f/{public_id}) ",
+    )
+    parser.add_argument(
+        "--telegram",
+        action="store_true",
+        help="run the real Telegram bot (Local Bot API Server + long "
+        "polling); requires BOT_TOKEN, TELEGRAM_API_ID/HASH and a running "
+        "local server",
     )
     return parser.parse_args()
 
@@ -63,8 +69,23 @@ def main() -> None:
     args = _parse_args()
     if args.api:
         run_api()
-    else:
-        run_bot()
+        return
+    if args.telegram:
+        from app.bot.telegram import run_telegram
+
+        run_telegram()
+        return
+
+    settings = get_settings()
+    if settings.bot_mode == "real":
+        # Explicitly configured for the real bot (BOT_MODE=real): start it.
+        from app.bot.telegram import run_telegram
+
+        run_telegram()
+        return
+
+    # Safe default: mock transport, no token/network required.
+    run_bot()
 
 
 if __name__ == "__main__":

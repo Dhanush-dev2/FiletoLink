@@ -3,13 +3,15 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 6 (end-to-end local download, mock transport).**
-> The bot runs locally on a **mock Telegram integration**: no `BOT_TOKEN`, no
-> external services, ₹0 cost. `/start` and `/help` work; sending a file yields
-> an acknowledgment with its metadata, persists it to **SQLite**, assigns a
-> secure **public id**, and replies with a **download URL**
-> (`{BASE_URL}/f/{public_id}`) that now **actually serves the file** through
-> a FastAPI endpoint (`python run.py --api`).
+> **Status — Milestone 8 (real Telegram transport ready, mock still default).**
+> Everything runs locally at ₹0 cost. **Mock mode** (no `BOT_TOKEN`, no
+> network) remains the default: `python run.py` gives you a chat loop,
+> sending files yields metadata → SQLite → public id → working download URL
+> via `python run.py --api`. A **real Telegram transport** is now implemented
+> (`python run.py --telegram`): python-telegram-bot in `local_mode` against a
+> self-hosted Local Bot API Server (`--local`), normalizing updates into the
+> same pipeline. The real end-to-end run requires the Local Bot API Server +
+> a real bot to be set up (see below).
 
 ## What it does
 
@@ -87,14 +89,32 @@ Never commit it.
 
 | Variable       | Default                | Purpose                                        |
 | -------------- | ---------------------- | ---------------------------------------------- |
-| `BOT_TOKEN`    | *(unset)*              | Real bot token (later phase). Not required now |
+| `BOT_TOKEN`    | *(unset)*              | Real bot token from @BotFather (real mode)     |
 | `BOT_USERNAME` | `file_to_link_bot`     | Placeholder bot username                       |
-| `BOT_MODE`     | `mock` (auto)          | `mock` or `real` (later phase)                 |
+| `BOT_MODE`     | `mock` (auto)          | `mock` or `real`                               |
+| `TELEGRAM_API_ID` | *(unset)*           | Free api_id for the Local Bot API Server       |
+| `TELEGRAM_API_HASH` | *(unset)*         | Free api_hash for the Local Bot API Server     |
+| `LOCAL_BOT_API_URL` | `http://127.0.0.1:8081` | Your self-hosted Local Bot API Server      |
+| `TELEGRAM_BOT_WORK_DIR` | `telegram_bot_data/` | Server's file storage dir (served files must live here) |
 | `BASE_URL`     | `http://localhost:8000`| Base URL for generated links (`{BASE_URL}/f/{id}`) || `HOST`     | `127.0.0.1`            | API host (Phase 5+)                            |
 | `PORT`     | `8000`                 | API port (Phase 5+)                            |
 | `DATABASE_PATH` | `data/files.db`  | SQLite database file (relative to project root) |
 
-## Running the bot
+## Mock vs real mode
+
+| | Mock (default) | Real |
+|---|---|---|
+| Requires `BOT_TOKEN`? | No | Yes |
+| Requires Local Bot API Server? | No | Yes |
+| Network access | None | Local server only |
+| Files come from | Local paths you `send` | Real Telegram users |
+| Run with | `python run.py` | `python run.py --telegram` or `BOT_MODE=real` |
+
+`BOT_MODE=mock` is the safe default whenever real Telegram configuration is
+absent. Both transports feed the **same** normalized updates into the same
+handlers, SQLite, FileService, and download endpoint.
+
+## Running the bot (mock)
 
 ```bash
 python run.py
@@ -105,6 +125,81 @@ or directly:
 ```bash
 python -m app.bot.mock
 ```
+
+## Real Telegram mode
+
+The bot connects to a **self-hosted Telegram Local Bot API Server** running
+with `--local`, using **long polling** — no public IP, no webhooks, no TLS
+needed for development. File bytes are never re-downloaded through the
+remote Telegram URL: the local server already stored them, `get_file`
+returns the absolute local path, and the API serves those bytes directly.
+
+### 1. Create the bot and get credentials
+
+- **`BOT_TOKEN`** — talk to [@BotFather](https://t.me/BotFather):
+  `/newbot` → copy the token into `.env`.
+- **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** — free, from
+  [my.telegram.org](https://my.telegram.org) → API development tools. These
+  are for the **Local Bot API Server** (different from `BOT_TOKEN`).
+
+### 2. Run the Local Bot API Server (`--local`)
+
+Official source: [`tdlib/telegram-bot-api`](https://github.com/tdlib/telegram-bot-api)
+(Boost license — free). It needs `api_id`/`api_hash` and stores received
+files under a working directory (`--dir`).
+
+**Linux (easiest):**
+
+```bash
+sudo apt install gperf cmake g++ libssl-dev zlib1g-dev
+mkdir -p ~/telegram-bot-api-build && cd ~/telegram-bot-api-build
+git clone --recursive https://github.com/tdlib/telegram-bot-api.git
+cd telegram-bot-api
+cmake -DCMAKE_BUILD_TYPE=Release .
+cmake --build . --target install
+# run it (keep the work dir in sync with TELEGRAM_BOT_WORK_DIR):
+telegram-bot-api --local --api-id=YOUR_ID --api-hash=YOUR_HASH --dir=$HOME/telegram-bot-data --http-port=8081
+```
+
+**Windows:** two options —
+1. *WSL2 (recommended):* follow the Linux steps inside a WSL2 Ubuntu distro,
+   then reach the server from Windows at `http://127.0.0.1:8081`.
+2. *Native:* use the official build-instructions generator
+   ([Windows](https://tdlib.github.io/telegram-bot-api/build.html?os=Windows))
+   with Visual Studio C++ + CMake, or a community prebuilt binary.
+
+### 3. Configure and run
+
+```bash
+# .env
+BOT_MODE=real
+BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TELEGRAM_API_ID=12345
+TELEGRAM_API_HASH=deadbeef
+LOCAL_BOT_API_URL=http://127.0.0.1:8081
+TELEGRAM_BOT_WORK_DIR=telegram_bot_data
+
+python run.py --telegram   # or: python run.py (BOT_MODE=real)
+```
+
+Startup is fail-fast and secret-free: missing `BOT_TOKEN`/API credentials or
+an unreachable local server produce clear error messages and exit code 1.
+
+### How the real file flow works
+
+```
+Telegram user sends file
+   ↓ Local Bot API Server (--local) stores bytes in its work dir
+python-telegram-bot (base_url + local_mode) receives update
+   ↓ normalize_update() → our Message/Document models
+bot.get_file(file_id) → absolute local path
+   ↓ FileService.save_document() → SQLite (source_path, public_id)
+   ↓ TelegramFileSource (work-dir enforced) → FastAPI → /f/{public_id}
+```
+
+`TelegramFileSource` only serves files physically inside
+`TELEGRAM_BOT_WORK_DIR`: traversal, absolute paths outside the directory,
+and symlinks escaping it are rejected; paths are never shown to users.
 
 ## Running the API (download server)
 
@@ -214,18 +309,12 @@ the handler's no-service path), public ids (format, uniqueness, collision
 retry, exhaustion), URL generation (format, normalization, validation), and
 the API (valid download with headers + counter, invalid/unknown → 404,
 deleted/expired → 410, missing source → 404, full mock-send → HTTP loop,
-schema migration). Because handlers are transport-free, the same tests will
-pass once the real Telegram integration lands.
-
-## Testing
-
-```bash
-pytest
-```
-
-The tests cover the bot handlers: `/start`, `/help`, unknown commands,
-plain text, and empty/absent messages. Because handlers are transport-free,
-the same tests will pass once the real Telegram integration lands.
+schema migration), and the real Telegram transport (PTB update → normalized
+models incl. missing mime/name/captions, TelegramFileSource containment,
+symlink/traversal rejection, config validation, application wiring, and the
+simulated document flow storing + serving bytes — all offline, no token or
+server needed). Because handlers are transport-free, the same tests pass
+in both mock and real modes.
 
 ## Public IDs
 
@@ -260,7 +349,9 @@ the same tests will pass once the real Telegram integration lands.
 `app/bot/mock.py` builds normalized `Update` objects — from text lines or
 from local files via `send <path>` — and feeds them into `handle_update()`,
 the exact function the real bot will call. There is no network, no token,
-and nothing to leak.
+and nothing to leak. The real transport (`app/bot/telegram.py`) does the
+same normalization for live Telegram updates, so both transports share
+100% of the downstream logic.
 
 ## Milestone plan (phase-by-phase)
 
@@ -270,9 +361,8 @@ and nothing to leak.
 4. ✅ Unique public IDs
 5. ✅ Link generation
 6. ✅ Download endpoint
-7. ⏳ Telegram Local Bot API Server (large files)
-7. Telegram Local Bot API Server (large files)
-8. Streaming
+7. ✅ Telegram Local Bot API Server (research + real transport wiring)
+8. ⏳ Streaming
 9. HTTP Range Requests
 10. Link management (expiration, counters, deletion)
 11. Security (rate limiting, validation)
@@ -286,10 +376,10 @@ be connected after the core project is finalized.
 
 ## Limitations (current milestone)
 
-- Mock transport only — no real Telegram traffic; mock file ids are
-  fabricated locally.
-- Files are served from local paths recorded by the mock (`source_path`);
-  records without a local path (or with a deleted file) return 404. The
-  real Telegram file source comes with the real integration.
+- **Real end-to-end not yet run here**: the Local Bot API Server is not
+  installed on this machine, so the live Telegram flow is implemented and
+  unit-tested offline, but the actual server + bot verification is pending
+  external setup (see Real Telegram mode above).
+- Mock transport remains the default and is fully functional.
 - No HTTP Range Requests, refined streaming, expiration handling, link
   management, or rate limiting yet.

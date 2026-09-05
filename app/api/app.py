@@ -15,10 +15,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
 
+from ..config import get_settings
 from ..database.connection import initialize
 from ..database.files import FileRepository
 from ..database.records import FileRecord
-from ..services.file_sources import FileSource, FileSourceError, LocalFileSource
+from ..services.file_sources import (
+    FileSource,
+    FileSourceError,
+    LocalFileSource,
+    TelegramFileSource,
+)
 from ..utils.public_ids import is_valid_public_id
 
 CHUNK_SIZE = 64 * 1024
@@ -64,7 +70,12 @@ def create_app(
     if repository is None:
         repository = FileRepository(initialize())
     if file_source is None:
-        file_source = LocalFileSource()
+        # Real mode serves the Local Bot API Server's files (work-dir
+        # enforced); mock mode serves the paths the mock transport recorded.
+        settings = get_settings()
+        file_source = (
+            TelegramFileSource() if settings.bot_mode == "real" else LocalFileSource()
+        )
 
     app = FastAPI(title="File-to-Link API")
 
