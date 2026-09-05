@@ -219,12 +219,27 @@ curl -i http://localhost:8000/f/doesNotExist  # 404
 
 Notes:
 
-- The endpoint increments `download_count` on every successful download.
-- The file source is abstracted (`app/services/file_sources.py`): today it
-  reads local paths recorded by the mock transport; the real Telegram
-  integration will plug in a source that fetches bytes via the Bot API.
-- HTTP Range Requests (seeking/resume) and refined streaming come in later
-  phases.
+- The endpoint increments `download_count` once per successful GET (range
+  GETs count once; HEAD never counts).
+- The file source is abstracted (`app/services/file_sources.py`): local
+  paths (mock) or the Local Bot API Server's work directory (real mode).
+
+### HTTP Range Requests
+
+`GET /f/{public_id}` supports standard single byte ranges
+(`Accept-Ranges: bytes`):
+
+- No `Range` header → `200` with the complete file.
+- `Range: bytes=0-99` / `bytes=100-` / `bytes=-100` → `206 Partial Content`
+  with `Content-Range: bytes <start>-<end>/<total>`, `Content-Length` of the
+  range, `Content-Type`, and `Content-Disposition`. Only the requested bytes
+  are streamed (seek + bounded 64 KB reads — never a whole-file read).
+- Malformed or unsatisfiable ranges (e.g. `bytes=999-1000` on a small file,
+  `bytes=100-50`, bad syntax, multi-range) → `416` with
+  `Content-Range: bytes */<total>`. Multi-range responses are not
+  implemented.
+- `HEAD /f/{public_id}` returns the same metadata headers with no body and
+  does not touch the download counter; 404/410 behavior is preserved.
 
 You get an interactive chat loop simulating a Telegram client:
 
@@ -362,8 +377,8 @@ same normalization for live Telegram updates, so both transports share
 5. ✅ Link generation
 6. ✅ Download endpoint
 7. ✅ Telegram Local Bot API Server (research + real transport wiring)
-8. ⏳ Streaming
-9. HTTP Range Requests
+8. ✅ Streaming (chunked, bounded reads)
+9. ✅ HTTP Range Requests
 10. Link management (expiration, counters, deletion)
 11. Security (rate limiting, validation)
 12. Error handling
@@ -381,5 +396,6 @@ be connected after the core project is finalized.
   unit-tested offline, but the actual server + bot verification is pending
   external setup (see Real Telegram mode above).
 - Mock transport remains the default and is fully functional.
-- No HTTP Range Requests, refined streaming, expiration handling, link
-  management, or rate limiting yet.
+- Single byte ranges only (no multipart/byteranges); malformed/unsatisfiable
+  ranges return 416.
+- No expiration handling, link management, or rate limiting yet.
