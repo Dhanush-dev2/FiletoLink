@@ -3,12 +3,12 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 2 (file receiving, mock transport).**
+> **Status — Milestone 3 (file receiving + SQLite persistence, mock transport).**
 > The bot runs locally on a **mock Telegram integration**: no `BOT_TOKEN`, no
-> external services, ₹0 cost. `/start` and `/help` work, and sending a file
-> yields an acknowledgment with its metadata (file id, name, size, MIME type,
-> message id, user id, timestamp). The database, link generation, and the
-> download endpoint arrive in later phases.
+> external services, ₹0 cost. `/start` and `/help` work; sending a file yields
+> an acknowledgment with its metadata (file id, name, size, MIME type, message
+> id, user id, timestamp) and persists that metadata to **SQLite**. Link
+> generation and the download endpoint arrive in later phases.
 
 ## What it does
 
@@ -30,7 +30,7 @@ opens link → file is served/downloaded
                  app/bot/handlers.py   (framework-agnostic bot logic)
                        │
                        ▼
-                  SQLite (Phase 3+)   File handling (Phase 2+)
+                  SQLite (data/files.db) ← app/database + app/services
                        │
                        ▼
                   Download endpoint (Phase 5+)
@@ -89,9 +89,9 @@ Never commit it.
 | `BOT_TOKEN`    | *(unset)*              | Real bot token (later phase). Not required now |
 | `BOT_USERNAME` | `file_to_link_bot`     | Placeholder bot username                       |
 | `BOT_MODE`     | `mock` (auto)          | `mock` or `real` (later phase)                 |
-| `BASE_URL`     | `http://localhost:8000`| Public base URL for generated links (Phase 5+) |
-| `HOST`         | `127.0.0.1`            | API host (Phase 5+)                            |
-| `PORT`         | `8000`                 | API port (Phase 5+)                            |
+| `BASE_URL`     | `http://localhost:8000`| Public base URL for generated links (Phase 5+) || `HOST`     | `127.0.0.1`            | API host (Phase 5+)                            |
+| `PORT`     | `8000`                 | API port (Phase 5+)                            |
+| `DATABASE_PATH` | `data/files.db`  | SQLite database file (relative to project root) |
 
 ## Running the bot
 
@@ -142,8 +142,25 @@ You: send samples/hello.txt
 ```
 
 `send <path>` reads the local file for its name/size, guesses the MIME type
-from the extension, and fabricates a mock Telegram file id. Missing or
-unreadable files get a friendly error.
+from the extension, and fabricates a mock Telegram file id. The metadata is
+persisted to SQLite (`data/files.db` by default), and the reply notes the
+stored record id. Missing or unreadable files get a friendly error.
+
+## Database
+
+- **Engine**: Python's built-in `sqlite3` — local file, zero cost, no server.
+- **Location**: `data/files.db` by default; configurable via `DATABASE_PATH`.
+  The directory is created automatically on first run.
+- **Files table**: `id`, `public_id` (UNIQUE, NULL until Phase 4),
+  `telegram_file_id`, `telegram_message_id`, `user_id`, `file_name`,
+  `file_size`, `mime_type`, `created_at` (epoch seconds), `expires_at`
+  (NULL = never), `download_count` (default 0), `status`
+  (`active`/`deleted`/`expired`, default `active`). Indexed on `public_id`,
+  `telegram_file_id`, and `status`.
+- **Layering**: `app/database/` owns all SQL (connection + schema +
+  repository). `app/services/files.py` turns normalized file messages into
+  stored records. Bot handlers and the mock transport never touch raw SQL.
+- **Inspect it**: `sqlite3 data/files.db 'SELECT * FROM files;'`
 
 ## Testing
 
@@ -152,11 +169,13 @@ pytest
 ```
 
 The tests cover the bot handlers (`/start`, `/help`, unknown commands, plain
-text, empty/absent messages) and file receiving (full metadata display,
-missing name/size/MIME type/timestamp, captions with documents, size
-formatting, mock file-document extraction, and missing-file errors). Because
-handlers are transport-free, the same tests will pass once the real Telegram
-integration lands.
+text, empty/absent messages), file receiving (full metadata display, missing
+name/size/MIME type/timestamp, captions with documents, size formatting,
+mock file-document extraction, missing-file errors), and the database
+(schema creation, create/retrieve/update/invalidate/delete, defaults,
+indexes, service-layer persistence, handler + transport integration, and
+the handler's no-service path). Because handlers are transport-free, the
+same tests will pass once the real Telegram integration lands.
 
 ## Testing
 
@@ -179,8 +198,8 @@ and nothing to leak.
 
 1. ✅ Bot scaffold + mock transport (`/start`, `/help`)
 2. ✅ File receiving (documents) + metadata extraction
-3. ⏳ SQLite database layer
-4. Unique public IDs
+3. ✅ SQLite database layer
+4. ⏳ Unique public IDs
 5. Link generation
 6. Download endpoint
 7. Telegram Local Bot API Server (large files)
@@ -200,6 +219,7 @@ be connected after the core project is finalized.
 
 - Mock transport only — no real Telegram traffic; mock file ids are
   fabricated locally.
-- Files are acknowledged with metadata only — no storage, no public links.
-- No database, links, or download endpoint yet.
-- No rate limiting or link management yet.
+- Metadata is stored, but files are not downloaded/stored locally and no
+  public links are generated yet (`public_id` stays NULL until Phase 4).
+- No download endpoint, expiration handling, or link management yet.
+- No rate limiting yet.

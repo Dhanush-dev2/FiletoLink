@@ -12,7 +12,8 @@ venv/
 .mypy_cache/
 *.egg-info/
 
-# Database files (used from Phase 3 onward)
+# Database files (local data directory)
+data/
 *.db
 *.sqlite3
 

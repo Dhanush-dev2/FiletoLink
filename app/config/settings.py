@@ -6,8 +6,12 @@ exported in the shell. The real ``.env`` is never committed; see
 """
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+# Project root: app/config/settings.py -> parents[0]=config, [1]=app, [2]=root.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Load variables from a .env file if present. Harmless when absent.
 load_dotenv()
@@ -44,6 +48,16 @@ class Settings:
         self.base_url: str = (_get_optional("BASE_URL") or "http://localhost:8000").rstrip("/")
         self.host: str = _get_optional("HOST") or "127.0.0.1"
         self.port: int = _get_int("PORT", 8000)
+        self.database_path: str = self._resolve_database_path()
+
+    def _resolve_database_path(self) -> str:
+        """SQLite location: DATABASE_PATH env var or data/files.db under the
+        project root. Relative paths resolve against the project root."""
+        raw = _get_optional("DATABASE_PATH")
+        if not raw:
+            return str(PROJECT_ROOT / "data" / "files.db")
+        path = Path(raw)
+        return str(path if path.is_absolute() else PROJECT_ROOT / path)
 
     @property
     def is_mock(self) -> bool:

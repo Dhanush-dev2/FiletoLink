@@ -6,6 +6,7 @@ future real Telegram integration needs to know how the other works.
 """
 from datetime import datetime, timezone
 
+from ..services.files import FileService
 from .models import Message, Update
 
 BOT_NAME = "File-to-Link Bot"
@@ -62,10 +63,12 @@ def _greeting_name(update: Update) -> str:
     return ""
 
 
-def _handle_document(message: Message) -> str:
+def _handle_document(message: Message, file_service: FileService | None = None) -> str:
     """Acknowledge a received file and display its metadata.
 
-    Public link generation is intentionally NOT implemented yet.
+    When a ``file_service`` is provided the metadata is persisted to SQLite
+    and the reply notes the record id. Public link generation is
+    intentionally NOT implemented yet.
     """
     doc = message.document
     lines = [
@@ -83,11 +86,18 @@ def _handle_document(message: Message) -> str:
         lines.append(f"👤 User ID: {message.user.id}")
     if message.date is not None:
         lines.append(f"🕒 Received: {format_timestamp(message.date)}")
+    if file_service is not None:
+        record = file_service.save_document(message)
+        lines.append(f"💾 Stored in database (record #{record.id})")
     return "\n".join(lines)
 
 
-def handle_update(update: Update) -> str:
-    """Route one update through the bot and return the reply text."""
+def handle_update(update: Update, file_service: FileService | None = None) -> str:
+    """Route one update through the bot and return the reply text.
+
+    ``file_service`` is optional: when provided, received files are
+    persisted to SQLite.
+    """
     message: Message | None = update.message
     if message is None:
         return (
@@ -95,7 +105,7 @@ def handle_update(update: Update) -> str:
             "Send /help to see what I can do."
         )
     if message.document is not None:
-        return _handle_document(message)
+        return _handle_document(message, file_service)
     if message.text is None:
         return (
             "🤔 I can only read text messages and files for now. "

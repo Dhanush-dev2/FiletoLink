@@ -24,6 +24,7 @@ import os
 import time
 
 from ..config import get_settings
+from ..services.files import FileService, make_file_service
 from ..utils.console import ensure_utf8_stdout
 from .handlers import handle_update
 from .models import Document, Message, Update, User
@@ -74,12 +75,20 @@ def local_file_document(path: str) -> Document:
     )
 
 
-def send_local_file(path: str, user: User = MOCK_USER) -> str:
+def send_local_file(
+    path: str,
+    user: User = MOCK_USER,
+    file_service: FileService | None = None,
+) -> str:
     """Simulate a user sending a local file; return the bot's reply.
 
-    Raises :class:`FileNotFoundError` (or another OSError) when the path
-    cannot be read — the REPL turns that into a friendly message.
+    When no ``file_service`` is given, an ephemeral in-memory database is
+    used (tests). Raises :class:`FileNotFoundError` (or another OSError)
+    when the path cannot be read — the REPL turns that into a friendly
+    message.
     """
+    if file_service is None:
+        file_service = make_file_service(":memory:")
     update = Update(
         update_id=1,
         message=Message(
@@ -89,7 +98,7 @@ def send_local_file(path: str, user: User = MOCK_USER) -> str:
             date=int(time.time()),
         ),
     )
-    return handle_update(update)
+    return handle_update(update, file_service=file_service)
 
 
 def _print_reply(reply: str) -> None:
@@ -103,7 +112,10 @@ def repl() -> None:
     print(f"{_BOT_FACE} {settings.bot_username} — mock Telegram bot (mode: {settings.bot_mode})")
     print("No bot token required. Type /start, /help, any message, or:")
     print("  send <path>   — simulate sending a local file to the bot")
+    print(f"💾 Files are stored in SQLite: {settings.database_path}")
     print("Type 'quit' or press Ctrl+C to exit.\n")
+
+    file_service = make_file_service()
 
     while True:
         try:
@@ -124,7 +136,7 @@ def repl() -> None:
                 print(f"{_BOT_FACE} 📎 Usage: send <path> — simulate sending a file.\n")
                 continue
             try:
-                _print_reply(send_local_file(path))
+                _print_reply(send_local_file(path, file_service=file_service))
             except FileNotFoundError:
                 print(f"{_BOT_FACE} ❌ No such file: {path}\n")
             except OSError as exc:
