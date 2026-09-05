@@ -89,6 +89,9 @@ def _handle_document(message: Message, file_service: FileService | None = None) 
     if file_service is not None:
         record = file_service.save_document(message)
         lines.append(f"💾 Stored in database (record #{record.id})")
+        if record.public_id is not None:
+            # The public link (Phase 5) will be built from this id.
+            lines.append(f"🔑 Public ID: {record.public_id}")
     return "\n".join(lines)
 
 

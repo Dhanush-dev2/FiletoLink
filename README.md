@@ -3,12 +3,12 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 3 (file receiving + SQLite persistence, mock transport).**
+> **Status — Milestone 4 (file receiving + SQLite + public IDs, mock transport).**
 > The bot runs locally on a **mock Telegram integration**: no `BOT_TOKEN`, no
 > external services, ₹0 cost. `/start` and `/help` work; sending a file yields
-> an acknowledgment with its metadata (file id, name, size, MIME type, message
-> id, user id, timestamp) and persists that metadata to **SQLite**. Link
-> generation and the download endpoint arrive in later phases.
+> an acknowledgment with its metadata, persists it to **SQLite**, and assigns
+> a secure, unpredictable **public id**. Link generation (URLs) and the
+> download endpoint arrive in later phases.
 
 ## What it does
 
@@ -139,6 +139,8 @@ You: send samples/hello.txt
 #️⃣ Message ID: 1
 👤 User ID: 123456789
 🕒 Received: 2026-09-05 15:48:38 UTC
+💾 Stored in database (record #1)
+🔑 Public ID: t9obSSQq
 ```
 
 `send <path>` reads the local file for its name/size, guesses the MIME type
@@ -151,7 +153,7 @@ stored record id. Missing or unreadable files get a friendly error.
 - **Engine**: Python's built-in `sqlite3` — local file, zero cost, no server.
 - **Location**: `data/files.db` by default; configurable via `DATABASE_PATH`.
   The directory is created automatically on first run.
-- **Files table**: `id`, `public_id` (UNIQUE, NULL until Phase 4),
+- **Files table**: `id`, `public_id` (UNIQUE, filled in on save),
   `telegram_file_id`, `telegram_message_id`, `user_id`, `file_name`,
   `file_size`, `mime_type`, `created_at` (epoch seconds), `expires_at`
   (NULL = never), `download_count` (default 0), `status`
@@ -187,6 +189,17 @@ The tests cover the bot handlers: `/start`, `/help`, unknown commands,
 plain text, and empty/absent messages. Because handlers are transport-free,
 the same tests will pass once the real Telegram integration lands.
 
+## Public IDs
+
+- Every stored file gets an 8-character public id from
+  `app/utils/public_ids.py` — generated with Python's `secrets` (CSPRNG),
+  URL-safe (`A-Z a-z 0-9 _ -`), never sequential, timestamps, or Telegram
+  file ids.
+- The UNIQUE index on `public_id` is the source of truth: on the
+  astronomically unlikely collision, `FileService` generates a fresh id and
+  retries (bounded, 10 attempts) — another file's id is never overwritten.
+- The public id is what later phases turn into a `/f/<id>` download link.
+
 ## How the mock works
 
 `app/bot/mock.py` builds normalized `Update` objects — from text lines or
@@ -199,8 +212,8 @@ and nothing to leak.
 1. ✅ Bot scaffold + mock transport (`/start`, `/help`)
 2. ✅ File receiving (documents) + metadata extraction
 3. ✅ SQLite database layer
-4. ⏳ Unique public IDs
-5. Link generation
+4. ✅ Unique public IDs
+5. ⏳ Link generation
 6. Download endpoint
 7. Telegram Local Bot API Server (large files)
 8. Streaming
@@ -219,7 +232,6 @@ be connected after the core project is finalized.
 
 - Mock transport only — no real Telegram traffic; mock file ids are
   fabricated locally.
-- Metadata is stored, but files are not downloaded/stored locally and no
-  public links are generated yet (`public_id` stays NULL until Phase 4).
-- No download endpoint, expiration handling, or link management yet.
-- No rate limiting yet.
+- Files are stored as metadata + public id only; no public **links** are
+  generated yet (that is Phase 5) and no download endpoint exists.
+- No expiration handling, link management, or rate limiting yet.

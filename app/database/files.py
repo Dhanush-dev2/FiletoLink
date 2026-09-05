@@ -43,22 +43,26 @@ class FileRepository:
     ) -> FileRecord:
         """Insert a new file record and return it. ``created_at`` defaults to now."""
         created_at = int(time.time()) if created_at is None else created_at
-        cur = self._conn.execute(
-            "INSERT INTO files "
-            "(telegram_file_id, telegram_message_id, user_id, file_name, "
-            " file_size, mime_type, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                telegram_file_id,
-                telegram_message_id,
-                user_id,
-                file_name,
-                file_size,
-                mime_type,
-                created_at,
-            ),
-        )
-        self._conn.commit()
+        try:
+            cur = self._conn.execute(
+                "INSERT INTO files "
+                "(telegram_file_id, telegram_message_id, user_id, file_name, "
+                " file_size, mime_type, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    telegram_file_id,
+                    telegram_message_id,
+                    user_id,
+                    file_name,
+                    file_size,
+                    mime_type,
+                    created_at,
+                ),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            self._conn.rollback()
+            raise
         return self.get_by_id(cur.lastrowid)
 
     def get_by_id(self, record_id: int) -> FileRecord | None:
@@ -109,11 +113,15 @@ class FileRepository:
             return self.get_by_id(record_id)
 
         assignments = ", ".join(f"{name} = ?" for name in fields)
-        self._conn.execute(
-            f"UPDATE files SET {assignments} WHERE id = ?",
-            (*fields.values(), record_id),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                f"UPDATE files SET {assignments} WHERE id = ?",
+                (*fields.values(), record_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            self._conn.rollback()  # keep the connection usable for retries
+            raise
         return self.get_by_id(record_id)
 
     def set_status(self, record_id: int, status: str) -> FileRecord | None:
@@ -122,6 +130,10 @@ class FileRepository:
 
     def delete(self, record_id: int) -> bool:
         """Hard-delete a record; returns True when a row was removed."""
-        cur = self._conn.execute("DELETE FROM files WHERE id = ?", (record_id,))
-        self._conn.commit()
+        try:
+            cur = self._conn.execute("DELETE FROM files WHERE id = ?", (record_id,))
+            self._conn.commit()
+        except sqlite3.Error:
+            self._conn.rollback()
+            raise
         return cur.rowcount > 0
