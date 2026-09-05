@@ -1,0 +1,10 @@
+# Runtime
+python-dotenv>=1.0,<2.0
+
+# Testing
+pytest>=8.0,<9.0
+
+# --- Coming in later phases (installed when used) ---
+# fastapi            # download API (Phase 5/6)
+# uvicorn            # ASGI server for the API
+# python-telegram-bot  # real Telegram integration (Phase 1 continuation)
