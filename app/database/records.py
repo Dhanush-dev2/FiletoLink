@@ -24,3 +24,4 @@ class FileRecord:
     expires_at: int | None
     download_count: int
     status: str
+    source_path: str | None

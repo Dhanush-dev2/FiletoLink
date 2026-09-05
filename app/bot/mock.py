@@ -98,6 +98,7 @@ def send_local_file(
             user=user,
             document=local_file_document(path),
             date=int(time.time()),
+            source_path=path,
         ),
     )
     return handle_update(update, file_service=file_service, base_url=base_url)

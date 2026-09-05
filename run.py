@@ -3,14 +3,51 @@
 Starts the bot in the configured mode. Until the real Telegram integration
 lands (a later phase), this launches the mock transport so the project runs
 with no BOT_TOKEN and no external services.
+
+Use ``python run.py --api`` to start the FastAPI download server instead.
 """
+import argparse
+
+from app.bot import mock
 from app.bot.mock import repl
 from app.config import get_settings
 from app.utils.console import ensure_utf8_stdout
 
 
-def main() -> None:
-    ensure_utf8_stdout()
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="run.py",
+        description="File-to-Link Bot: mock Telegram bot or download API.",
+    )
+    parser.add_argument(
+        "--api",
+        action="store_true",
+        help="run the FastAPI download server (GET /f/{public_id}) "
+        "instead of the mock Telegram bot",
+    )
+    return parser.parse_args()
+
+
+def run_api() -> None:
+    """Start the download API with the configured host/port."""
+    import uvicorn
+
+    from app.api.app import create_app
+
+    settings = get_settings()
+    print(
+        f"▶ Starting download API on http://{settings.host}:{settings.port} "
+        f"(BASE_URL: {settings.base_url})"
+    )
+    uvicorn.run(
+        create_app(),
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
+
+
+def run_bot() -> None:
     settings = get_settings()
     print(f"▶ Starting {settings.bot_username} in {settings.bot_mode.upper()} mode")
     if not settings.is_mock:
@@ -18,7 +55,16 @@ def main() -> None:
             "⚠️  Real Telegram polling is not implemented yet "
             "(it lands in a later phase) — falling back to mock transport."
         )
-    repl()
+    mock.repl()
+
+
+def main() -> None:
+    ensure_utf8_stdout()
+    args = _parse_args()
+    if args.api:
+        run_api()
+    else:
+        run_bot()
 
 
 if __name__ == "__main__":

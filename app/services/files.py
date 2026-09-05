@@ -44,6 +44,7 @@ class FileService:
             file_size=doc.file_size,
             mime_type=doc.mime_type,
             created_at=message.date,
+            source_path=message.source_path,
         )
         return self._assign_public_id(record.id)
 

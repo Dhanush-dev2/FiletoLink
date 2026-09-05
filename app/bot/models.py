@@ -32,6 +32,10 @@ class Message:
     user: User | None = None
     document: Document | None = None
     date: int | None = None  # Unix epoch seconds, Telegram-style
+    # Transport hint: where the file bytes can be read. The mock transport
+    # sets this to a local path; the real Telegram integration will use its
+    # own file source instead and leave this None.
+    source_path: str | None = None
 
 
 @dataclass(frozen=True)

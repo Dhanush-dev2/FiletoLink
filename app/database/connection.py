@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS files (
     expires_at INTEGER,
     download_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'deleted', 'expired'))
+        CHECK (status IN ('active', 'deleted', 'expired')),
+    source_path TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_files_public_id ON files (public_id);
@@ -46,14 +47,33 @@ def connect(database: str | Path | None = None) -> sqlite3.Connection:
     database = str(database)
     if database != ":memory:":
         Path(database).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(database)
+    # check_same_thread=False: FastAPI runs sync endpoints in a threadpool,
+    # so the connection is used from request threads, not just the creating
+    # thread. SQLite serializes access internally; transactions here are
+    # short (single execute + commit), which keeps this safe for a local app.
+    conn = sqlite3.connect(database, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, declaration: str
+) -> None:
+    """ALTER TABLE migration for databases created before the column existed."""
+    columns = {
+        row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
 def initialize_schema(conn: sqlite3.Connection) -> None:
-    """Create the tables and indexes if they do not exist yet."""
+    """Create the tables and indexes if they do not exist yet.
+
+    Also applies lightweight migrations for pre-existing databases.
+    """
     conn.executescript(SCHEMA)
+    _add_column_if_missing(conn, "files", "source_path", "TEXT")
     conn.commit()
 
 

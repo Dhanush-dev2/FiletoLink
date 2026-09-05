@@ -3,13 +3,13 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 5 (file receiving + SQLite + public links, mock transport).**
+> **Status — Milestone 6 (end-to-end local download, mock transport).**
 > The bot runs locally on a **mock Telegram integration**: no `BOT_TOKEN`, no
 > external services, ₹0 cost. `/start` and `/help` work; sending a file yields
 > an acknowledgment with its metadata, persists it to **SQLite**, assigns a
-> secure **public id**, and replies with a generated **download URL**
-> (`{BASE_URL}/f/{public_id}`). The URL does not serve the file yet — the
-> download endpoint arrives in the next phase.
+> secure **public id**, and replies with a **download URL**
+> (`{BASE_URL}/f/{public_id}`) that now **actually serves the file** through
+> a FastAPI endpoint (`python run.py --api`).
 
 ## What it does
 
@@ -106,6 +106,31 @@ or directly:
 python -m app.bot.mock
 ```
 
+## Running the API (download server)
+
+```bash
+python run.py --api
+# or: uvicorn --factory app.api.app:create_app --host 127.0.0.1 --port 8000
+```
+
+The API serves `GET /f/{public_id}` on `HOST:PORT` (default
+`127.0.0.1:8000`). Files sent through the mock bot are served from the
+local path recorded at send time — so links keep working across restarts.
+
+```bash
+curl -i http://localhost:8000/f/t9obSSQq      # 200 + file bytes
+curl -i http://localhost:8000/f/doesNotExist  # 404
+```
+
+Notes:
+
+- The endpoint increments `download_count` on every successful download.
+- The file source is abstracted (`app/services/file_sources.py`): today it
+  reads local paths recorded by the mock transport; the real Telegram
+  integration will plug in a source that fetches bytes via the Bot API.
+- HTTP Range Requests (seeking/resume) and refined streaming come in later
+  phases.
+
 You get an interactive chat loop simulating a Telegram client:
 
 ```
@@ -147,8 +172,10 @@ You: send samples/hello.txt
 http://localhost:8000/f/t9obSSQq
 ```
 
-The URL is generated from the configured `BASE_URL` — it does **not** serve
-the file yet (that is the download endpoint, a later phase).
+The URL is generated from the configured `BASE_URL`. With the API running
+(`python run.py --api`) it **actually serves the file**: `GET /f/{public_id}`
+returns the bytes with `200`, unknown/invalid ids give `404`, and
+inactive (deleted/expired) links give `410 Gone`.
 
 `send <path>` reads the local file for its name/size, guesses the MIME type
 from the extension, and fabricates a mock Telegram file id. The metadata is
@@ -180,11 +207,15 @@ pytest
 The tests cover the bot handlers (`/start`, `/help`, unknown commands, plain
 text, empty/absent messages), file receiving (full metadata display, missing
 name/size/MIME type/timestamp, captions with documents, size formatting,
-mock file-document extraction, missing-file errors), and the database
+mock file-document extraction, missing-file errors), the database
 (schema creation, create/retrieve/update/invalidate/delete, defaults,
 indexes, service-layer persistence, handler + transport integration, and
-the handler's no-service path). Because handlers are transport-free, the
-same tests will pass once the real Telegram integration lands.
+the handler's no-service path), public ids (format, uniqueness, collision
+retry, exhaustion), URL generation (format, normalization, validation), and
+the API (valid download with headers + counter, invalid/unknown → 404,
+deleted/expired → 410, missing source → 404, full mock-send → HTTP loop,
+schema migration). Because handlers are transport-free, the same tests will
+pass once the real Telegram integration lands.
 
 ## Testing
 
@@ -238,7 +269,8 @@ and nothing to leak.
 3. ✅ SQLite database layer
 4. ✅ Unique public IDs
 5. ✅ Link generation
-6. ⏳ Download endpoint
+6. ✅ Download endpoint
+7. ⏳ Telegram Local Bot API Server (large files)
 7. Telegram Local Bot API Server (large files)
 8. Streaming
 9. HTTP Range Requests
@@ -256,7 +288,8 @@ be connected after the core project is finalized.
 
 - Mock transport only — no real Telegram traffic; mock file ids are
   fabricated locally.
-- Download URLs are **generated but do not serve files yet** — there is no
-  `GET /f/{public_id}` endpoint until the next phase.
-- No expiration handling, link management, download counters, or rate
-  limiting yet.
+- Files are served from local paths recorded by the mock (`source_path`);
+  records without a local path (or with a deleted file) return 404. The
+  real Telegram file source comes with the real integration.
+- No HTTP Range Requests, refined streaming, expiration handling, link
+  management, or rate limiting yet.

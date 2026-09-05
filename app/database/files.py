@@ -16,7 +16,7 @@ _UNSET = object()
 _SELECT_COLUMNS = (
     "id, public_id, telegram_file_id, telegram_message_id, user_id, "
     "file_name, file_size, mime_type, created_at, expires_at, "
-    "download_count, status"
+    "download_count, status, source_path"
 )
 
 
@@ -40,6 +40,7 @@ class FileRepository:
         file_size: int | None = None,
         mime_type: str | None = None,
         created_at: int | None = None,
+        source_path: str | None = None,
     ) -> FileRecord:
         """Insert a new file record and return it. ``created_at`` defaults to now."""
         created_at = int(time.time()) if created_at is None else created_at
@@ -47,8 +48,8 @@ class FileRepository:
             cur = self._conn.execute(
                 "INSERT INTO files "
                 "(telegram_file_id, telegram_message_id, user_id, file_name, "
-                " file_size, mime_type, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " file_size, mime_type, created_at, source_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     telegram_file_id,
                     telegram_message_id,
@@ -57,6 +58,7 @@ class FileRepository:
                     file_size,
                     mime_type,
                     created_at,
+                    source_path,
                 ),
             )
             self._conn.commit()
@@ -78,6 +80,14 @@ class FileRepository:
             f"SELECT {_SELECT_COLUMNS} FROM files "
             "WHERE telegram_file_id = ? ORDER BY id DESC LIMIT 1",
             (telegram_file_id,),
+        ).fetchone()
+        return _row_to_record(row) if row else None
+
+    def get_by_public_id(self, public_id: str) -> FileRecord | None:
+        """Retrieve the record for a public id, or None when unknown."""
+        row = self._conn.execute(
+            f"SELECT {_SELECT_COLUMNS} FROM files WHERE public_id = ?",
+            (public_id,),
         ).fetchone()
         return _row_to_record(row) if row else None
 
