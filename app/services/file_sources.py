@@ -52,7 +52,13 @@ class LocalFileSource:
         path = Path(record.source_path)
         if not path.is_file():
             raise FileSourceError(f"source file missing: {path}")
-        return path.open("rb")
+        try:
+            return path.open("rb")
+        except OSError as exc:
+            # The file exists but cannot be read (permissions, I/O error, ...).
+            # Surface it as FileSourceError so callers map it to a clean 404
+            # instead of letting a raw OSError become a 500.
+            raise FileSourceError(f"source file unreadable: {path}") from exc
 
 
 class TelegramFileSource:
@@ -94,4 +100,10 @@ class TelegramFileSource:
             )
         if not resolved.is_file():
             raise FileSourceError(f"source file missing: {resolved}")
-        return resolved.open("rb")
+        try:
+            return resolved.open("rb")
+        except OSError as exc:
+            # Readable-check passed but the open still failed (permissions,
+            # I/O error, ...): report it as FileSourceError (→ 404), never a
+            # raw OSError (→ 500).
+            raise FileSourceError("source file unreadable") from exc

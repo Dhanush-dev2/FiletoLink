@@ -44,7 +44,7 @@ import time
 from typing import BinaryIO, Iterator
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..config import Settings, get_settings
@@ -147,14 +147,34 @@ def _error(
     )
 
 
-def _head_response(record: FileRecord, range_header: str | None = None) -> Response:
+def _head_response(
+    record: FileRecord,
+    file_source: FileSource,
+    range_header: str | None = None,
+) -> Response:
     """Metadata-only response mirroring what the matching GET would return.
 
-    Never opens the file and never reserves a download slot. With a valid
+    Like GET it verifies the bytes are actually available (opens and
+    immediately closes the source), so a missing or unreadable file gives
+    the same ``404`` as GET, and the size (hence ``Content-Length``) is
+    resolved the same way when the record stores no ``file_size``. It never
+    sends a body and never reserves a download slot, and with a valid
     ``Range`` it returns ``206`` (or ``416`` when unsatisfiable) exactly like
-    GET, so HEAD is a faithful preview of the download.
+    GET.
     """
-    total = record.file_size
+    try:
+        stream = file_source.open(record)
+    except FileSourceError:
+        # Return through _error (not HTTPException) so the security headers
+        # are still attached to this 404.
+        return _error(404, "File content is not available", is_head=True)
+    try:
+        total = record.file_size
+        if total is None:
+            total = _stream_size(stream)
+    finally:
+        stream.close()
+
     if total is not None:
         try:
             rng = parse_range_header(range_header, total)
@@ -198,10 +218,10 @@ def _get_response(
     """Serve the full file (200) or the requested byte range (206/416)."""
     try:
         stream = file_source.open(record)
-    except FileSourceError as exc:
-        raise HTTPException(
-            status_code=404, detail="File content is not available"
-        ) from exc
+    except FileSourceError:
+        # Return through _error (not HTTPException) so the security headers
+        # are still attached to this 404.
+        return _error(404, "File content is not available", is_head=False)
 
     total = record.file_size
     if total is None:
@@ -334,7 +354,9 @@ def create_app(
                 return _error(
                     410, "This link is no longer available", is_head=is_head
                 )
-            return _head_response(record, request.headers.get("range"))
+            return _head_response(
+                record, file_source, request.headers.get("range")
+            )
 
         # 6. Atomically reserve one download slot. The single conditional
         #    UPDATE checks status, expiration, and the download limit, so
@@ -360,14 +382,8 @@ def create_app(
         # 7. Serve the bytes. If nothing can be served (missing source →
         #    404, unsatisfiable range → 416) the reserved slot is released
         #    so failed requests do not burn a download.
-        try:
-            response = _get_response(
-                record, file_source, request.headers.get("range")
-            )
-        except HTTPException:
-            repository.release_download_slot(record.id)
-            raise
-        if response.status_code == 416:
+        response = _get_response(record, file_source, request.headers.get("range"))
+        if response.status_code >= 400:
             repository.release_download_slot(record.id)
         return response
 

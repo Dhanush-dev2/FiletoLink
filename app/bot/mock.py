@@ -75,7 +75,14 @@ def local_file_document(path: str) -> Document:
     Reads the file's name and size, guesses the MIME type from the
     extension, and fabricates a mock file id (real Telegram file ids are
     only available once the real integration lands).
+
+    Only regular files can be sent: a directory (or other non-file path)
+    raises :class:`IsADirectoryError` rather than producing a stored link
+    whose bytes could never be served. Missing paths still raise
+    :class:`FileNotFoundError` (from ``getsize``) as before.
     """
+    if os.path.exists(path) and not os.path.isfile(path):
+        raise IsADirectoryError(f"not a regular file: {path}")
     file_name = os.path.basename(path)
     file_size = os.path.getsize(path)
     mime_type, _ = mimetypes.guess_type(path)
