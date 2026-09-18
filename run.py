@@ -1,8 +1,8 @@
 """Project entry point.
 
-Starts the bot in the configured mode. Until the real Telegram integration
-lands (a later phase), this launches the mock transport so the project runs
-with no BOT_TOKEN and no external services.
+Starts the bot in the configured mode. The default is the mock transport
+(no BOT_TOKEN and no network); ``--telegram`` (or ``BOT_MODE=real``) starts
+the real Telegram bot, which needs a Local Bot API Server and credentials.
 
 Use ``python run.py --api`` to start the FastAPI download server instead.
 """
@@ -58,8 +58,9 @@ def run_bot() -> None:
     print(f"▶ Starting {settings.bot_username} in {settings.bot_mode.upper()} mode")
     if not settings.is_mock:
         print(
-            "⚠️  Real Telegram polling is not implemented yet "
-            "(it lands in a later phase) — falling back to mock transport."
+            f"⚠️  BOT_MODE={settings.bot_mode!r} is not recognised — "
+            "starting the mock transport. Use BOT_MODE=real (with a "
+            "BOT_TOKEN) for the real Telegram bot."
         )
     mock.repl()
 

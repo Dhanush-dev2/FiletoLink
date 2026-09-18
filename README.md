@@ -37,7 +37,7 @@ opens link → file is served/downloaded
                   SQLite (data/files.db) ← app/database + app/services
                        │
                        ▼
-                  Download endpoint (Phase 5+)
+                  Download endpoint (GET /f/{public_id})
                        │
                        ▼
                       User
@@ -97,8 +97,9 @@ Never commit it.
 | `TELEGRAM_API_HASH` | *(unset)*         | Free api_hash for the Local Bot API Server     |
 | `LOCAL_BOT_API_URL` | `http://127.0.0.1:8081` | Your self-hosted Local Bot API Server      |
 | `TELEGRAM_BOT_WORK_DIR` | `telegram_bot_data/` | Server's file storage dir (served files must live here) |
-| `BASE_URL`     | `http://localhost:8000`| Base URL for generated links (`{BASE_URL}/f/{id}`) || `HOST`     | `127.0.0.1`            | API host (Phase 5+)                            |
-| `PORT`     | `8000`                 | API port (Phase 5+)                            |
+| `BASE_URL`     | `http://localhost:8000`| Base URL for generated links (`{BASE_URL}/f/{id}`) |
+| `HOST`         | `127.0.0.1`            | Download API bind host                         |
+| `PORT`         | `8000`                 | Download API port                              |
 | `DATABASE_PATH` | `data/files.db`  | SQLite database file (relative to project root) |
 
 ## Mock vs real mode
@@ -435,9 +436,10 @@ transport-free, the same tests pass in both mock and real modes.
   (public id format, base URL scheme).
 - **Flow**: `FileService.save_document()` → record with public id →
   `generate_file_url(base_url, public_id)` → handler reply.
-- ⚠️ The generated URL is display-only at this phase: visiting it does not
-  serve the file yet. The `GET /f/{public_id}` download endpoint is the
-  next phase.
+- **The URL is live**: `GET /f/{public_id}` serves the stored bytes — `200`
+  for a full download, `206` for a valid `Range`, `416` for an unsatisfiable
+  range, and `HEAD` for metadata only. Deleted, expired, or
+  download-exhausted links return `410 Gone`.
 
 ## How the mock works
 

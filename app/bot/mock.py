@@ -43,8 +43,20 @@ def _fake_file_id() -> str:
     return f"BQAD{raw}"
 
 
-def reply_to(text: str, user: User = MOCK_USER) -> str:
-    """Route one plain user message through the bot and return the reply."""
+def reply_to(
+    text: str,
+    user: User = MOCK_USER,
+    file_service: FileService | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Route one plain user message through the bot and return the reply.
+
+    ``file_service``/``base_url`` are forwarded to the shared handler, so
+    the interactive REPL can serve link-management commands (``/info``,
+    ``/delete``) against the *same* database it stores files in. Passing a
+    service never bypasses ownership: the handler still compares the stored
+    ``user_id`` against ``user`` (the shared mock identity by default).
+    """
     update = Update(
         update_id=1,
         message=Message(
@@ -54,7 +66,7 @@ def reply_to(text: str, user: User = MOCK_USER) -> str:
             date=int(time.time()),
         ),
     )
-    return handle_update(update)
+    return handle_update(update, file_service=file_service, base_url=base_url)
 
 
 def local_file_document(path: str) -> Document:
@@ -150,7 +162,9 @@ def repl() -> None:
                 print(f"{_BOT_FACE} ❌ Could not read {path}: {exc}\n")
             continue
 
-        _print_reply(reply_to(line))
+        _print_reply(
+            reply_to(line, file_service=file_service, base_url=settings.base_url)
+        )
 
 
 if __name__ == "__main__":
