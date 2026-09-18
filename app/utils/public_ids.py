@@ -13,7 +13,8 @@ import secrets
 PUBLIC_ID_BYTES = 6
 
 # Canonical public id shape: exactly 8 URL-safe characters.
-PUBLIC_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8}$")
+PUBLIC_ID_LENGTH = 8
+PUBLIC_ID_PATTERN = re.compile(rf"^[A-Za-z0-9_-]{{{PUBLIC_ID_LENGTH}}}$")
 
 
 def generate_public_id() -> str:

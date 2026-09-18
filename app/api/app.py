@@ -23,6 +23,18 @@ Byte-range behavior (RFC 7233, single range):
 - malformed/unsatisfiable ranges → ``416`` with ``Content-Range: bytes */N``
 - a valid range GET consumes exactly one download slot
 
+Abuse protection & hardening (Phase 11):
+
+- ``GET``/``HEAD`` are rate limited per **client identity** (see
+  :mod:`app.utils.ratelimit`) *before* any lookup, so probing for public ids
+  is throttled too; over the limit → ``429`` with ``Retry-After``. Only
+  client identities are tracked, never link ids.
+- security headers are attached to every response (:mod:`app.api.security`);
+  stored MIME metadata is sanitised (:mod:`app.utils.mime`) with an
+  ``application/octet-stream`` fallback;
+- ``HEAD`` mirrors the matching GET status/headers (``200``/``206``/``416``)
+  with no body and without consuming a download slot.
+
 Run it with:
     python run.py --api
     # or: uvicorn --factory app.api.app:create_app --host 127.0.0.1 --port 8000
@@ -30,12 +42,12 @@ Run it with:
 import os
 import time
 from typing import BinaryIO, Iterator
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from urllib.parse import quote
 
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..database.connection import initialize
 from ..database.files import FileRepository
 from ..database.records import FileRecord
@@ -45,8 +57,11 @@ from ..services.file_sources import (
     LocalFileSource,
     TelegramFileSource,
 )
-from ..utils.public_ids import is_valid_public_id
+from ..utils.mime import resolve_content_type
+from ..utils.public_ids import PUBLIC_ID_LENGTH, is_valid_public_id
+from ..utils.ratelimit import RateLimiter
 from ..utils.ranges import UnsatisfiableRange, parse_range_header
+from .security import SECURITY_HEADERS, client_key
 
 CHUNK_SIZE = 64 * 1024
 
@@ -96,19 +111,25 @@ def _filename_header(record: FileRecord) -> str:
     )
 
 
+def _headers(**extra: str) -> dict[str, str]:
+    """Security headers plus any response-specific headers."""
+    return {**SECURITY_HEADERS, **extra}
+
+
 def _content_headers(
     record: FileRecord,
     *,
     content_length: int,
     content_range: str | None = None,
 ) -> dict[str, str]:
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(content_length),
-    }
-    if record.mime_type:
-        headers["Content-Type"] = record.mime_type
-    headers["Content-Disposition"] = _filename_header(record)
+    headers = _headers(
+        **{
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(content_length),
+            "Content-Type": resolve_content_type(record.mime_type),
+            "Content-Disposition": _filename_header(record),
+        }
+    )
     if content_range:
         headers["Content-Range"] = content_range
     return headers
@@ -118,20 +139,54 @@ def _error(
     status: int, detail: str, *, is_head: bool, headers: dict[str, str] | None = None
 ) -> Response:
     """JSON error for GET; header-only (empty body) error for HEAD."""
+    response_headers = _headers(**(headers or {}))
     if is_head:
-        return Response(status_code=status, headers=headers or {})
+        return Response(status_code=status, headers=response_headers)
     return JSONResponse(
-        status_code=status, content={"detail": detail}, headers=headers or {}
+        status_code=status, content={"detail": detail}, headers=response_headers
     )
 
 
-def _head_response(record: FileRecord) -> Response:
-    headers: dict[str, str] = {"Accept-Ranges": "bytes"}
-    if record.file_size is not None:
-        headers["Content-Length"] = str(record.file_size)
-    if record.mime_type:
-        headers["Content-Type"] = record.mime_type
-    headers["Content-Disposition"] = _filename_header(record)
+def _head_response(record: FileRecord, range_header: str | None = None) -> Response:
+    """Metadata-only response mirroring what the matching GET would return.
+
+    Never opens the file and never reserves a download slot. With a valid
+    ``Range`` it returns ``206`` (or ``416`` when unsatisfiable) exactly like
+    GET, so HEAD is a faithful preview of the download.
+    """
+    total = record.file_size
+    if total is not None:
+        try:
+            rng = parse_range_header(range_header, total)
+        except UnsatisfiableRange:
+            return Response(
+                status_code=416,
+                headers=_headers(**{"Content-Range": f"bytes */{total}"}),
+            )
+        if rng is not None:
+            start, end = rng
+            return Response(
+                status_code=206,
+                headers=_headers(
+                    **{
+                        "Accept-Ranges": "bytes",
+                        "Content-Length": str(end - start + 1),
+                        "Content-Type": resolve_content_type(record.mime_type),
+                        "Content-Disposition": _filename_header(record),
+                        "Content-Range": f"bytes {start}-{end}/{total}",
+                    }
+                ),
+            )
+
+    headers = _headers(
+        **{
+            "Accept-Ranges": "bytes",
+            "Content-Type": resolve_content_type(record.mime_type),
+            "Content-Disposition": _filename_header(record),
+        }
+    )
+    if total is not None:
+        headers["Content-Length"] = str(total)
     return Response(status_code=200, headers=headers)
 
 
@@ -155,10 +210,13 @@ def _get_response(
         # Size unknown: serve the whole stream without range support.
         return StreamingResponse(
             _iter_chunks(stream),
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Disposition": _filename_header(record),
-            },
+            headers=_headers(
+                **{
+                    "Accept-Ranges": "bytes",
+                    "Content-Type": resolve_content_type(record.mime_type),
+                    "Content-Disposition": _filename_header(record),
+                }
+            ),
         )
 
     try:
@@ -194,19 +252,28 @@ def _get_response(
 def create_app(
     repository: FileRepository | None = None,
     file_source: FileSource | None = None,
+    rate_limiter: RateLimiter | None = None,
+    settings: Settings | None = None,
 ) -> FastAPI:
     """Build the API. Defaults to the configured database and a file source.
 
-    Tests inject an in-memory repository and a source of their choosing.
+    Tests inject an in-memory repository, a source of their choosing, and/or
+    a pre-built rate limiter.
     """
+    settings = settings or get_settings()
     if repository is None:
         repository = FileRepository(initialize())
     if file_source is None:
         # Real mode serves the Local Bot API Server's files (work-dir
         # enforced); mock mode serves the paths the mock transport recorded.
-        settings = get_settings()
         file_source = (
             TelegramFileSource() if settings.bot_mode == "real" else LocalFileSource()
+        )
+    if rate_limiter is None and settings.rate_limit_enabled:
+        rate_limiter = RateLimiter(
+            limit=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+            max_keys=settings.rate_limit_max_keys,
         )
 
     app = FastAPI(title="File-to-Link API")
@@ -215,10 +282,26 @@ def create_app(
         # Shared by GET and HEAD; the branch below only alters
         # headers/body/counter.
         is_head = request.method == "HEAD"
+
+        # 0. Abuse protection: per-client rate limit, before any validation
+        #    or lookup, so probing for public ids is throttled as well. Only
+        #    client identities are tracked (never link ids), so invalid ids
+        #    cannot grow per-file state.
+        if rate_limiter is not None:
+            allowed, retry_after = rate_limiter.check(client_key(request, settings))
+            if not allowed:
+                return _error(
+                    429,
+                    "Too many requests",
+                    is_head=is_head,
+                    headers={"Retry-After": str(retry_after)},
+                )
+
         now = int(time.time())
 
-        # 1. Validate the public id.
-        if not is_valid_public_id(public_id):
+        # 1. Validate the public id (cheap length check first, so an
+        #    oversized path parameter is rejected without scanning it).
+        if len(public_id) != PUBLIC_ID_LENGTH or not is_valid_public_id(public_id):
             return _error(404, "File not found", is_head=is_head)
 
         # 2. Look up the record.
@@ -251,7 +334,7 @@ def create_app(
                 return _error(
                     410, "This link is no longer available", is_head=is_head
                 )
-            return _head_response(record)
+            return _head_response(record, request.headers.get("range"))
 
         # 6. Atomically reserve one download slot. The single conditional
         #    UPDATE checks status, expiration, and the download limit, so

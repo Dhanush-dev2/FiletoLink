@@ -3,8 +3,9 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 10 (link management: expiration, download limits,
-> deletion, owner-only /delete and /info).** Everything runs locally at ₹0
+> **Status — Milestone 11 (security & abuse protection: per-client rate
+> limiting, security headers, MIME hardening, HEAD+Range).** Everything runs
+> locally at ₹0
 > cost. **Mock mode** (no `BOT_TOKEN`, no network) remains the default:
 > `python run.py` gives you a chat loop, sending files yields metadata →
 > SQLite → public id → working download URL via `python run.py --api`. A
@@ -101,6 +102,12 @@ Never commit it.
 | `HOST`         | `127.0.0.1`            | Download API bind host                         |
 | `PORT`         | `8000`                 | Download API port                              |
 | `DATABASE_PATH` | `data/files.db`  | SQLite database file (relative to project root) |
+| `RATE_LIMIT_ENABLED` | `true`         | Throttle `GET`/`HEAD /f/{id}` per client        |
+| `RATE_LIMIT_REQUESTS` | `60`          | Requests allowed per window                     |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60`    | Window length for the limit                     |
+| `RATE_LIMIT_MAX_KEYS` | `10000`      | Max tracked clients (bounds limiter memory)     |
+| `TRUST_PROXY_HEADERS` | `false`      | Trust `X-Forwarded-For` (only behind a proxy)   |
+| `TRUSTED_PROXIES` | *(unset)*          | Comma-separated proxy IPs allowed to set it     |
 
 ## Mock vs real mode
 
@@ -366,6 +373,80 @@ from the extension, and fabricates a mock Telegram file id. The metadata is
 persisted to SQLite (`data/files.db` by default), and the reply notes the
 stored record id. Missing or unreadable files get a friendly error.
 
+## Security (Phase 11)
+
+Everything below is free/open-source and local — no paid service, no Redis,
+no external infrastructure.
+
+### Rate limiting
+
+- `GET` and `HEAD /f/{public_id}` are limited **per client identity**: by
+default `RATE_LIMIT_REQUESTS` requests per `RATE_LIMIT_WINDOW_SECONDS`
+(60 per 60 s). Over the limit returns **`429 Too Many Requests`** with a
+`Retry-After` header. Disable with `RATE_LIMIT_ENABLED=false`.
+- The limiter is a small in-process sliding window (`app/utils/ratelimit.py`).
+That is appropriate for this single-process, self-hosted app; if you ever run
+several worker processes, each keeps its own window (limits become
+per-worker).
+- The limit is checked **before any lookup**, so probing for public ids is
+throttled too. Keys are **client identities only — never link ids**, so
+random/invalid ids cannot grow per-file state. The number of tracked keys is
+capped by `RATE_LIMIT_MAX_KEYS` (least-recently-used eviction), so memory
+cannot grow without bound from attacker-controlled addresses.
+
+### Client identity / proxy trust
+
+By default the limiter keys on the **actual TCP peer address**, and
+`X-Forwarded-For` is ignored — a client cannot spoof its identity. If you
+run behind a reverse proxy, set `TRUST_PROXY_HEADERS=true` and list the
+proxy's IP(s) in `TRUSTED_PROXIES`; the forwarded address is then trusted
+**only** when the direct peer is a listed proxy. Configuration validation
+refuses `TRUST_PROXY_HEADERS=true` with an empty `TRUSTED_PROXIES`, and
+rejects invalid IPs.
+
+### Response security headers
+
+Every download response (including errors and 429s) carries
+`X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src
+'none'; sandbox`, and `Referrer-Policy: no-referrer`. Files are always sent
+with `Content-Disposition: attachment`, so range requests and normal
+downloads are unaffected.
+
+### MIME / content hardening
+
+Stored MIME metadata is untrusted, so it is sanitised
+(`app/utils/mime.py`): well-formed `type/subtype` values are preserved, while
+missing, empty, or malformed values (including anything containing control
+characters that could inject headers) fall back to
+`application/octet-stream`. This only guarantees a safe *header* — it is not
+content inspection.
+
+### Request hardening
+
+- The public-id path parameter is length-checked (exactly 8 chars) before the
+format regex, so oversized paths are rejected cheaply.
+- Malformed/oversized/multi-range headers are rejected as `416` without
+opening the file; parsing stays bounded and files are streamed in 64 KB
+chunks (never fully read into memory).
+- `HEAD` mirrors the matching `GET` status and headers (`200`/`206`/`416`)
+with no body and **without consuming a download slot**.
+
+### Host binding
+
+`HOST` defaults to `127.0.0.1` (localhost only). Binding to a non-loopback
+address (e.g. `0.0.0.0`) exposes the API beyond your machine; the server
+prints a warning, and since links are public URLs anyone holding one can
+download, do this only on a trusted network.
+
+### LocalFileSource (mock mode)
+
+`LocalFileSource` (mock mode) has **no path containment**, by design:
+`source_path` is set only by the local operator via `send <path>` (or tests),
+never from untrusted remote input, so serving operator-chosen local files is
+the intended local-testing behavior. Real Telegram mode uses
+`TelegramFileSource`, which already enforces the work directory and rejects
+traversal/symlink escapes.
+
 ## Database
 
 - **Engine**: Python's built-in `sqlite3` — local file, zero cost, no server.
@@ -462,7 +543,7 @@ same normalization for live Telegram updates, so both transports share
 8. ✅ Streaming (chunked, bounded reads)
 9. ✅ HTTP Range Requests
 10. ✅ Link management (expiration, counters, deletion, /delete, /info)
-11. Security (rate limiting, validation)
+11. ✅ Security & abuse protection (rate limiting, headers, MIME, validation)
 12. Error handling
 13. Logging
 14. Testing
@@ -480,6 +561,11 @@ be connected after the core project is finalized.
 - Mock transport remains the default and is fully functional.
 - Single byte ranges only (no multipart/byteranges); malformed/unsatisfiable
   ranges return 416.
-- Expiration, download limits, and deletion are per-link database settings;
-  there is no rate limiting, signed-URL, or per-user authentication beyond
-  the owner check on /delete and /info.
+- Expiration, download limits, and deletion are per-link database settings.
+  Rate limiting is per-client (per-process) rather than per-link; there is
+  still no signed-URL or per-user authentication beyond the owner check on
+  `/delete` and `/info`.
+- A range-size cap is deliberately **not** implemented: a range can never
+  return more than the file itself (no amplification), and full large-file
+  downloads are the project's purpose — request frequency is what the rate
+  limiter covers.

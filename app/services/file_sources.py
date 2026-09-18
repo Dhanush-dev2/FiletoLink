@@ -35,6 +35,15 @@ class LocalFileSource:
     The mock transport records where each received file came from. Files
     received before this source existed (or from other sources) simply
     have no local path and raise :class:`FileSourceError`.
+
+    Trust model (Phase 11 review): unlike :class:`TelegramFileSource`, this
+    source has **no path containment**, and deliberately so. ``source_path``
+    is set only by the *local operator* running the mock REPL (``send
+    <path>``) or by tests — never from untrusted remote input — so serving
+    any operator-chosen local file is the intended local-testing behavior.
+    Real Telegram mode uses :class:`TelegramFileSource`, which enforces the
+    work directory. If mock mode is ever exposed to untrusted users, the
+    operator has chosen to publish those specific files via their links.
     """
 
     def open(self, record: FileRecord) -> BinaryIO:
