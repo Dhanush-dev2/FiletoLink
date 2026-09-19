@@ -82,13 +82,26 @@ def normalize_update(update: telegram.Update) -> NormalizedUpdate:
     )
 
 
-async def _resolve_local_path(bot: Bot, file_id: str) -> str:
+async def _resolve_local_path(
+    bot: Bot,
+    file_id: str,
+    *,
+    read_timeout: float | None = None,
+) -> str:
     """Return the absolute local path of a received file.
 
     With a Local Bot API Server running in ``--local`` mode, ``get_file``
     returns the absolute path of the already-stored file — no download.
+
+    ``getFile`` gets its own long read timeout (Phase 14A): storing a
+    multi-hundred-MB file can take well past PTB's small default, and the
+    request must not time out while the local server finishes. The timeout
+    defaults to :attr:`Settings.telegram_get_file_read_timeout_seconds` and
+    applies only to this call — polling/getUpdates timeouts are untouched.
     """
-    tg_file = await bot.get_file(file_id)
+    if read_timeout is None:
+        read_timeout = get_settings().telegram_get_file_read_timeout_seconds
+    tg_file = await bot.get_file(file_id, read_timeout=read_timeout)
     path = tg_file.file_path
     if not path or not os.path.isabs(path):
         raise ValueError(

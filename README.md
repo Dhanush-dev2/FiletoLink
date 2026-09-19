@@ -98,6 +98,7 @@ Never commit it.
 | `TELEGRAM_API_HASH` | *(unset)*         | Free api_hash for the Local Bot API Server     |
 | `LOCAL_BOT_API_URL` | `http://127.0.0.1:8081` | Your self-hosted Local Bot API Server      |
 | `TELEGRAM_BOT_WORK_DIR` | `telegram_bot_data/` | Server's file storage dir (served files must live here) |
+| `TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS` | `300` | Read timeout for the Local Bot API `getFile` request (large files) |
 | `BASE_URL`     | `http://localhost:8000`| Base URL for generated links (`{BASE_URL}/f/{id}`) |
 | `HOST`         | `127.0.0.1`            | Download API bind host                         |
 | `PORT`         | `8000`                 | Download API port                              |
@@ -187,6 +188,7 @@ TELEGRAM_API_ID=12345
 TELEGRAM_API_HASH=deadbeef
 LOCAL_BOT_API_URL=http://127.0.0.1:8081
 TELEGRAM_BOT_WORK_DIR=telegram_bot_data
+TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS=300
 
 python run.py --telegram   # or: python run.py (BOT_MODE=real)
 ```
@@ -201,7 +203,7 @@ Telegram user sends file
    ↓ Local Bot API Server (--local) stores bytes in its work dir
 python-telegram-bot (base_url + local_mode) receives update
    ↓ normalize_update() → our Message/Document models
-bot.get_file(file_id) → absolute local path
+bot.get_file(file_id, read_timeout=...) → absolute local path
    ↓ FileService.save_document() → SQLite (source_path, public_id)
    ↓ TelegramFileSource (work-dir enforced) → FastAPI → /f/{public_id}
 ```

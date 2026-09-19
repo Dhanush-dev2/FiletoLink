@@ -95,6 +95,13 @@ class Settings:
             _get_optional("LOCAL_BOT_API_URL") or "http://127.0.0.1:8081"
         ).rstrip("/")
         self.telegram_bot_work_dir: str = self._resolve_work_dir()
+        # Phase 14A: read timeout for the Local Bot API ``getFile`` request.
+        # Large files (hundreds of MB) can make the request take far longer
+        # than PTB's small default, so it gets its own configurable timeout.
+        # This applies ONLY to file retrieval, never to polling/getUpdates.
+        self.telegram_get_file_read_timeout_seconds: int = _get_int(
+            "TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", 300
+        )
         # Phase 11: abuse protection (public download endpoint) + proxy trust.
         self.rate_limit_enabled: bool = _get_bool("RATE_LIMIT_ENABLED", True)
         self.rate_limit_requests: int = _get_int("RATE_LIMIT_REQUESTS", 60)
@@ -161,6 +168,10 @@ class Settings:
             raise ValueError("RATE_LIMIT_WINDOW_SECONDS must be >= 1")
         if self.rate_limit_max_keys < 1:
             raise ValueError("RATE_LIMIT_MAX_KEYS must be >= 1")
+        if self.telegram_get_file_read_timeout_seconds < 1:
+            raise ValueError(
+                "TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS must be >= 1"
+            )
         if self.trust_proxy_headers and not self.trusted_proxies:
             raise ValueError(
                 "TRUST_PROXY_HEADERS is enabled but TRUSTED_PROXIES is empty; "

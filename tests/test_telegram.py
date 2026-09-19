@@ -13,6 +13,7 @@ import telegram
 
 from app.bot.models import Document, Message, Update, User
 from app.bot.telegram import (
+    _resolve_local_path,
     build_application,
     handle_command_update,
     handle_message_update,
@@ -78,8 +79,12 @@ class FakeBot:
         self.local_path = local_path
         self.error = error
         self.sent: list[str] = []
+        # Records the keyword args of every get_file call so tests can assert
+        # that only the file-retrieval timeout is customized.
+        self.get_file_calls: list[dict] = []
 
-    async def get_file(self, file_id: str) -> SimpleNamespace:
+    async def get_file(self, file_id: str, **kwargs) -> SimpleNamespace:
+        self.get_file_calls.append({"file_id": file_id, **kwargs})
         if self.error is not None:
             raise self.error
         return SimpleNamespace(file_path=self.local_path)
@@ -279,6 +284,25 @@ def test_settings_loads_telegram_vars(monkeypatch):
     assert s.telegram_bot_work_dir.endswith("custom_dir")
 
 
+def test_get_file_timeout_default_is_used_when_env_absent(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", raising=False)
+    assert Settings().telegram_get_file_read_timeout_seconds == 300
+
+
+def test_get_file_timeout_custom_value_is_honored(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", "900")
+    assert Settings().telegram_get_file_read_timeout_seconds == 900
+
+
+def test_get_file_timeout_rejects_invalid_values(monkeypatch):
+    for bad in ("0", "-1", "soon"):
+        monkeypatch.setenv("TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", bad)
+        with pytest.raises(
+            ValueError, match="TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS"
+        ):
+            Settings()
+
+
 def test_validate_real_config_reports_missing(monkeypatch):
     monkeypatch.delenv("BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
@@ -320,6 +344,80 @@ def test_build_application_registers_handlers():
 
     assert sum(isinstance(h, CommandHandler) for h in handlers) == 4
     assert sum(isinstance(h, MessageHandler) for h in handlers) == 1
+
+
+# ── getFile read timeout (Phase 14A) ───────────────────────────────────────
+
+
+def _clear_settings():
+    """Drop the cached settings so env-var changes take effect."""
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+
+def test_resolve_local_path_uses_default_read_timeout(monkeypatch, tmp_path):
+    monkeypatch.delenv("TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", raising=False)
+    _clear_settings()
+    try:
+        bot = FakeBot(local_path=str(tmp_path / "file.mkv"))
+        path = run_async(_resolve_local_path(bot, "FILE1"))
+        assert path == str(tmp_path / "file.mkv")
+        assert bot.get_file_calls == [
+            {"file_id": "FILE1", "read_timeout": 300}
+        ]
+    finally:
+        _clear_settings()
+
+
+def test_resolve_local_path_honors_configured_read_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", "1234")
+    _clear_settings()
+    try:
+        bot = FakeBot(local_path=str(tmp_path / "file.mkv"))
+        run_async(_resolve_local_path(bot, "FILE1"))
+        assert bot.get_file_calls[0]["read_timeout"] == 1234
+    finally:
+        _clear_settings()
+
+
+def test_document_flow_passes_read_timeout_to_get_file(monkeypatch, tmp_path):
+    monkeypatch.delenv("TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS", raising=False)
+    _clear_settings()
+    try:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        source_file = work_dir / "movie.mkv"
+        source_file.write_bytes(b"x")
+
+        repo = FileRepository(initialize(":memory:"))
+        service = FileService(repo)
+        bot = FakeBot(local_path=str(source_file))
+        update = make_ptb_update(make_ptb_message(document=make_ptb_document()))
+
+        run_async(
+            handle_message_update(bind(update, bot), make_context(bot), service)
+        )
+
+        assert bot.get_file_calls == [
+            {"file_id": "FILE1", "read_timeout": 300}
+        ]
+        assert repo.get_by_id(1).source_path == str(source_file)
+    finally:
+        _clear_settings()
+
+
+def test_document_flow_handles_get_file_timeout(tmp_path):
+    repo = FileRepository(initialize(":memory:"))
+    service = FileService(repo)
+    bot = FakeBot(error=telegram.error.TimedOut("Timed out"))
+    update = make_ptb_update(make_ptb_message(document=make_ptb_document()))
+
+    run_async(handle_message_update(bind(update, bot), make_context(bot), service))
+
+    assert bot.sent
+    assert "❌" in bot.sent[0]
+    assert repo.get_by_id(1) is None  # timeout must not create a record
 
 
 # ── real flow (simulated Local Bot API Server) ─────────────────────────────
