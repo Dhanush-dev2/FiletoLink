@@ -3,10 +3,13 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Phase 14B (file ownership: FileToLink keeps its own copy of every
-> received file, so downloads no longer depend on the Telegram Local Bot API
-> Server's file storage).** Earlier work: security & abuse protection
-> (per-client rate limiting, security headers, MIME hardening, HEAD+Range).
+> **Status — Phase 15 (deployment readiness: reproducible startup, restart,
+> and backup for the same Windows/local, ₹0-cost deployment — see
+> **Deployment & operations** below). Earlier work — Phase 14B file
+> ownership: FileToLink keeps its own copy of every received file, so
+> downloads no longer depend on the Telegram Local Bot API Server's file
+> storage; security & abuse protection (per-client rate limiting, security
+> headers, MIME hardening, HEAD+Range).
 > Everything runs locally at ₹0
 > cost. **Mock mode** (no `BOT_TOKEN`, no network) remains the default:
 > `python run.py` gives you a chat loop, sending files yields metadata →
@@ -299,6 +302,133 @@ Notes:
   the Local Bot API Server's work directory.
 - Lifecycle checks take precedence over range handling: an expired, deleted,
   or exhausted link returns `410 Gone` even when a `Range` header is sent.
+
+## Deployment & operations (Phase 15)
+
+Everything stays on one Windows machine at ₹0/$0 cost. This section is the
+operational runbook: what runs, in what order, and how to recover.
+
+### Prerequisites
+
+- Python 3.12 with the project's `.venv` (`pip install -r requirements.txt`)
+- Git (`.env` and `data/` stay untracked)
+- Real Telegram mode only: a Local Bot API Server binary
+  (`tdlib/telegram-bot-api`, built natively or inside WSL2) and Tailscale for
+  the public funnel
+- Nothing else: SQLite is a file, storage is a directory, there is no daemon
+
+### What runs (five windows)
+
+| Window | Process | Start with | Depends on |
+|---|---|---|---|
+| 1 | Local Bot API Server (`--local`, port 8081) | `scripts\start_bot_api_server.bat <exe> <api_id> <api_hash>` (or the WSL2 equivalent) | api_id/api_hash from my.telegram.org |
+| 2 | FileToLink bot (long polling) | `scripts\start_bot.bat` | Window 1 (pings it, exits if unreachable) |
+| 3 | FastAPI download server | `scripts\start_api.bat` | SQLite + FileToLink storage only |
+| 4 | Tailscale Funnel | `tailscale funnel 8000` (publishes HOST:PORT) | Window 3 |
+| 5 | Testing / commands | `pytest`, `curl`, a Telegram client | — |
+
+**Startup order: 1 → 2 → 3 → 4 → 5.** Windows 2 and 3 are independent of
+each other; Window 4 must come after 3. The scripts run in the foreground of
+their own terminal window and hide nothing; the bot and API print the
+resolved database and file-storage paths at startup, so a misconfiguration
+is visible immediately. On Linux/macOS (or WSL2 for every window), run the
+same commands directly: `python run.py --telegram` / `python run.py --api`.
+
+**Shutdown order: reverse — 4, then 3, then 2, then 1** (Ctrl+C in each
+window). Stopping 1 while 2/3 still run does not break existing downloads
+(serving never touches the Local Bot API work dir); it only stops new files
+from being received.
+
+### Directory layout
+
+| Path | Env var | Created | Role |
+|---|---|---|---|
+| `data/files.db` | `DATABASE_PATH` | automatically on first run | SQLite metadata (all state about links) |
+| `data/storage/<public_id>/<filename>` | `FILE_STORAGE_DIR` | automatically on first transfer | FileToLink-owned bytes, one directory per link |
+| `telegram_bot_data/` | `TELEGRAM_BOT_WORK_DIR` | by the Local Bot API Server | its own work dir — disposable staging, **never** application storage |
+| `.env` | — | you (copy `.env.example`) | deployment configuration, never committed |
+
+Relative path values resolve against the project root. The database + the
+storage directory together are the entire application state; everything else
+is reproducible from the repository.
+
+### Environment configuration
+
+Copy `.env.example` to `.env` and set the deployment values — `BASE_URL`
+must be your funnel URL when publishing through Tailscale. Mock mode with
+zero configuration keeps working for development (`python run.py`). Never
+commit `.env`, paste it into reports, or log it.
+
+### Restart / recovery
+
+- **FastAPI restart — always safe.** It is stateless (fresh rate limiter,
+  records re-read from SQLite); links keep working across the restart apart
+  from the brief port-rebind gap.
+- **Bot restart — safe.** Long polling resumes; adopted files and records
+  persist. Updates still queued in the Local Bot API Server are re-delivered.
+- **Local Bot API Server restart — safe for existing links.** They are
+  served from `FILE_STORAGE_DIR`, never from its work dir, which may even be
+  wiped between restarts (files not yet adopted at that moment are lost to
+  ingestion; no link ever depended on them).
+- After any restart, compare Window 2 and Window 3 startup banners: their
+  database and file-storage paths must match (a mismatch is the classic
+  "bot stores here, API serves there" failure).
+
+### Testing procedure
+
+```bash
+pytest
+```
+
+The suite is hermetic: it runs against the shipped defaults regardless of
+the deployment `.env` (a shared fixture isolates FileToLink environment
+variables per test), so results are identical on a fresh clone and on an
+operator machine. Symlink tests skip where Windows lacks the privilege.
+
+### Backup basics
+
+Back up exactly two things, together:
+
+1. `data/files.db` — all metadata: links, owners, counters, lifecycle state
+2. `data/storage/` — the bytes those links point to
+
+They are one logical unit (`source_path` in the database points into the
+storage tree). To back up safely, stop Window 2 and Window 3 first, or use
+`sqlite3 data/files.db ".backup 'backup/files.db'"` for a live-consistent DB
+copy, then copy the storage directory. Restoring only one half yields:
+
+- database without files → links answer `404` (record active, bytes missing)
+- files without database → nothing is served (no records); the storage is
+  unreferenced and can be deleted
+
+There is no background cleanup daemon: expired or fully-downloaded links
+keep their bytes until an owner deletes the link.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| Bot exits: "Cannot reach the Local Bot API Server" | Window 1 not running, or `LOCAL_BOT_API_URL` wrong — start Window 1 first |
+| Bot exits listing `BOT_TOKEN`/`TELEGRAM_API_*` | `.env` incomplete for real mode; mock mode still works (`python run.py`) |
+| `run.py --api`: bind error 10048 | Port already in use — another API instance is running, or `PORT` conflicts |
+| Links 404 after a restart | Bot and API resolved different `DATABASE_PATH`/`FILE_STORAGE_DIR` — compare the startup banners |
+| Link active but GET 404 | Owned file missing (storage moved/restored incompletely) |
+| `410 Gone` | Terminal by design: deleted, expired, or download limit consumed |
+| Works locally, dead publicly | `BASE_URL` ≠ funnel URL, Window 4 funnel not started, or Window 3 not running |
+
+### Deployment security notes
+
+- Only the FastAPI server needs public exposure, and only through Tailscale
+  Funnel. `HOST` stays `127.0.0.1` (the funnel connects from localhost); the
+  server warns if bound wider. Never funnel/forward the Local Bot API port
+  8081 — it speaks plain HTTP and is for this machine only.
+- Behind the funnel every visitor arrives from `127.0.0.1`, so per-visitor
+  rate limiting needs `TRUST_PROXY_HEADERS=true` and
+  `TRUSTED_PROXIES=127.0.0.1` (with the `X-Forwarded-For` the funnel adds);
+  otherwise all visitors share one loopback bucket.
+- Data-at-rest protection is the Windows user profile's file permissions:
+  keep `DATABASE_PATH`/`FILE_STORAGE_DIR` inside the user profile on shared
+  machines.
 
 ## Link management (expiration, limits, deletion)
 
@@ -627,7 +757,8 @@ same normalization for live Telegram updates, so both transports share
 12. Error handling
 13. Logging
 14. Testing
-15. Free deployment options
+15. ✅ Deployment readiness & reproducible operations (config, scripts,
+    restart/backup runbook)
 
 Each milestone ends in a working, testable state. The real Telegram bot will
 be connected after the core project is finalized.

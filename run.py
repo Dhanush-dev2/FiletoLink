@@ -45,6 +45,18 @@ def _is_loopback(host: str) -> bool:
         return False
 
 
+def print_runtime_paths(settings) -> None:
+    """Print the resolved durable-data locations (paths only, never secrets).
+
+    Operational aid: a mismatched resolution (e.g. the bot ingesting into one
+    FILE_STORAGE_DIR while the API serves another) is a classic deployment
+    failure — printing the resolved paths makes it visible at startup.
+    """
+    print(f"   bot mode:     {settings.bot_mode}")
+    print(f"   database:     {settings.database_path}")
+    print(f"   file storage: {settings.file_storage_dir}")
+
+
 def run_api() -> None:
     """Start the download API with the configured host/port."""
     import uvicorn
@@ -56,6 +68,7 @@ def run_api() -> None:
         f"▶ Starting download API on http://{settings.host}:{settings.port} "
         f"(BASE_URL: {settings.base_url})"
     )
+    print_runtime_paths(settings)
     if not _is_loopback(settings.host):
         print(
             f"⚠️  Binding to {settings.host!r} exposes the download API beyond "
@@ -93,6 +106,7 @@ def main() -> None:
         if args.telegram:
             from app.bot.telegram import run_telegram
 
+            print_runtime_paths(get_settings())
             run_telegram()
             return
 
@@ -101,6 +115,7 @@ def main() -> None:
             # Explicitly configured for the real bot (BOT_MODE=real): start it.
             from app.bot.telegram import run_telegram
 
+            print_runtime_paths(settings)
             run_telegram()
             return
 
