@@ -99,6 +99,67 @@ def safe_file_name(name: str | None, fallback: str = _FALLBACK_NAME) -> str:
     return candidate[:255]
 
 
+def find_owned_file(
+    root: str | Path,
+    *,
+    public_id: str | None,
+    source_path: str | Path | None = None,
+) -> Path | None:
+    """Locate the FileToLink-owned file for a link, tolerant of a moved root.
+
+    The normal case is the recorded ``source_path``, which points inside
+    ``root``. After a backup is restored to a *different* location (another
+    folder, drive, or machine) the recorded absolute path no longer exists
+    under ``root``; the on-disk layout — one directory per link,
+    ``<root>/<public_id>/<filename>`` — then identifies the file, so a restore
+    does not break live links and needs no manual database surgery.
+
+    Only files physically inside ``root`` are ever returned (symlinks that
+    escape it are rejected). A partially written ``.part`` file is never
+    treated as owned content, so an interrupted copy is never served.
+    """
+    root = Path(root).resolve()
+    if source_path:
+        try:
+            candidate = Path(source_path).resolve(strict=False)
+        except OSError:
+            candidate = None
+        if (
+            candidate is not None
+            and candidate != root
+            and candidate.is_relative_to(root)
+            and not candidate.name.endswith(PART_SUFFIX)
+            and candidate.is_file()
+        ):
+            return candidate
+
+    # Fall back to the public-id-keyed layout: this is what makes a restored
+    # database + storage work regardless of where it was restored to.
+    if not public_id or not is_valid_public_id(public_id):
+        return None
+    directory = root / public_id
+    try:
+        if not directory.is_dir():
+            return None
+        files = [
+            entry
+            for entry in directory.iterdir()
+            if entry.is_file() and not entry.name.endswith(PART_SUFFIX)
+        ]
+    except OSError:
+        return None
+    if not files:
+        return None
+    if source_path:
+        wanted = Path(source_path).name
+        for entry in files:
+            if entry.name == wanted:
+                return entry
+    if len(files) == 1:
+        return files[0]
+    return None
+
+
 def _same_device(source: Path, dest_dir: Path) -> bool:
     """Whether ``source`` and ``dest_dir`` live on the same filesystem.
 
@@ -226,6 +287,33 @@ class FileStorage:
         return str(files[0])
 
     # ── cleanup ────────────────────────────────────────────────────────────
+
+    def owned_file(
+        self, public_id: str | None, source_path: str | Path | None
+    ) -> Path | None:
+        """The actual owned file for a link, tolerating a moved storage root.
+
+        Prefers the recorded ``source_path``; falls back to the public-id-keyed
+        layout when the database + storage were restored elsewhere (see
+        :func:`find_owned_file`). Returns None when no owned file is found.
+        """
+        return find_owned_file(
+            self.root, public_id=public_id, source_path=source_path
+        )
+
+    def remove_owned_link(
+        self, public_id: str | None, source_path: str | Path | None
+    ) -> bool:
+        """Delete a link's owned file, resolving it by public id if needed.
+
+        Used by deletion so a link whose bytes were restored to a different
+        location is cleaned up correctly (without manual database surgery).
+        Never raises: a filesystem failure is logged and reported as False.
+        """
+        target = self.owned_file(public_id, source_path)
+        if target is None:
+            return False
+        return self.remove_owned(target)
 
     def remove_owned(self, path: str | Path) -> bool:
         """Delete one FileToLink-owned file (and its now-empty link directory).

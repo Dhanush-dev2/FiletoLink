@@ -111,7 +111,9 @@ class FileService:
             return None
         deleted = self.repository.set_status(record.id, "deleted")
         if deleted is not None and self.storage is not None and record.source_path:
-            self.storage.remove_owned(record.source_path)
+            # Resolve by public id as well, so a link whose bytes were restored
+            # to a different location is still cleaned up (no DB surgery).
+            self.storage.remove_owned_link(record.public_id, record.source_path)
         return deleted
 
     # ── recording ──────────────────────────────────────────────────────────

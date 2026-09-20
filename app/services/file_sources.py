@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from ..database.records import FileRecord
+from .storage import find_owned_file
 
 
 class FileSourceError(RuntimeError):
@@ -148,3 +149,29 @@ class StorageFileSource(ContainedFileSource):
         if root is None:
             root = get_settings().file_storage_dir
         super().__init__(root)
+
+    def open(self, record: FileRecord) -> BinaryIO:
+        """Open the owned file, tolerant of a storage root that moved.
+
+        Resolves through :func:`~app.services.storage.find_owned_file`: the
+        recorded path first, then the public-id-keyed layout, so a database +
+        storage backup restored to a different location still serves every
+        link. Containment against ``FILE_STORAGE_DIR`` is preserved — only
+        files physically inside the root are ever returned — and ``.part``
+        leftovers are never served.
+        """
+        path = find_owned_file(
+            self.root,
+            public_id=record.public_id,
+            source_path=record.source_path,
+        )
+        if path is None:
+            if not record.source_path:
+                raise FileSourceError("record has no source path")
+            raise FileSourceError(
+                "source file missing or outside the allowed storage directory"
+            )
+        try:
+            return path.open("rb")
+        except OSError as exc:
+            raise FileSourceError("source file unreadable") from exc

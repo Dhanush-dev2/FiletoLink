@@ -3,9 +3,15 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Phase 15 (deployment readiness: reproducible startup, restart,
-> and backup for the same Windows/local, ₹0-cost deployment — see
-> **Deployment & operations** below). Earlier work — Phase 14B file
+> **Status — Phase 18** (reliability & operations: restart, backup/restore, and
+> missing/orphaned-file recovery are verified end-to-end, and a backup restored
+> to a *different* folder, drive, or machine keeps every public link working
+> with no manual database surgery — see *Deployment & operations* below).
+> The restart and staging-loss checks were additionally verified by hand on
+> the real Windows deployment (see *Real-machine verification (Phase 18)*
+> below).
+> Phase 15 deployment readiness: reproducible startup, restart, and backup for
+> the same Windows/local, ₹0-cost deployment. Earlier work — Phase 14B file
 > ownership: FileToLink keeps its own copy of every received file, so
 > downloads no longer depend on the Telegram Local Bot API Server's file
 > storage; security & abuse protection (per-client rate limiting, security
@@ -370,9 +376,15 @@ commit `.env`, paste it into reports, or log it.
   served from `FILE_STORAGE_DIR`, never from its work dir, which may even be
   wiped between restarts (files not yet adopted at that moment are lost to
   ingestion; no link ever depended on them).
+- **A missing owned file — 404, never 500, and never a burned download.** A
+  link `active` in the database but missing on disk answers `404` (no
+  download slot is consumed); putting the bytes back makes the same public
+  link work again immediately — no restart and no database edit.
 - After any restart, compare Window 2 and Window 3 startup banners: their
   database and file-storage paths must match (a mismatch is the classic
-  "bot stores here, API serves there" failure).
+  "bot stores here, API serves there" failure). This still catches a genuine
+  misconfiguration, because the API only finds a restored file when its own
+  `FILE_STORAGE_DIR` actually contains it.
 
 ### Testing procedure
 
@@ -401,8 +413,40 @@ copy, then copy the storage directory. Restoring only one half yields:
 - files without database → nothing is served (no records); the storage is
   unreferenced and can be deleted
 
-There is no background cleanup daemon: expired or fully-downloaded links
-keep their bytes until an owner deletes the link.
+**Restore both halves together and links survive — wherever they land.** The
+storage layout is keyed by the public id
+(`data/storage/<public_id>/<filename>`), so after restoring the database and
+the storage directory together, each link is resolved through its public id.
+This holds even when the restore is to a different folder, a different drive,
+or another machine: the absolute paths recorded at ingest time are no longer
+required, and no SQL needs rewriting. `/delete` uses the same resolution, so
+cleanup also works after a moved restore.
+
+Crashed or interrupted ingestion can leave an unreferenced file in storage
+(e.g. a transfer that succeeded but whose record was never written). It has no
+public id of its own in the database, so it is never served and is safe to
+delete; a partially copied `.part` file is likewise never served. There is no
+background cleanup daemon: expired or fully-downloaded links keep their bytes
+until an owner deletes the link.
+
+### Real-machine verification (Phase 18)
+
+The restart, ownership, and staging-loss behaviour described above was
+verified by hand on the real Windows deployment (windows 1–3: Local Bot API
+Server, bot, FastAPI), using a real DOCX upload — public id `ylb6n993`,
+stored size 46,101 bytes:
+
+| Check | Procedure | Result |
+|---|---|---|
+| Bot restart (Window 2) | Restart the bot; upload a new DOCX | PASS — new upload ingested; public id `ylb6n993`, 46,101 bytes stored |
+| FastAPI restart (Window 3) | Restart the API; fetch the link | PASS — HTTP 200, full download of exactly 46,101 bytes |
+| Local Bot API Server restart (Window 1) | Restart the server using the full executable path | PASS — the FileToLink-owned file remained available |
+| Staging work-dir loss | Rename/replace `D:\telegram-bot-data`; restart Window 1 | PASS — the existing link `ylb6n993` still downloaded exactly 46,101 bytes |
+
+All real-machine operational checks for Parts 2–5 of the Phase 18 plan PASS.
+Links survived every restart — including the destruction of the Local Bot API
+Server's staging work dir — because downloads are served exclusively from
+FileToLink-owned storage; the staging dir is only an ingestion source.
 
 ### Troubleshooting
 
@@ -412,7 +456,7 @@ keep their bytes until an owner deletes the link.
 | Bot exits listing `BOT_TOKEN`/`TELEGRAM_API_*` | `.env` incomplete for real mode; mock mode still works (`python run.py`) |
 | `run.py --api`: bind error 10048 | Port already in use — another API instance is running, or `PORT` conflicts |
 | Links 404 after a restart | Bot and API resolved different `DATABASE_PATH`/`FILE_STORAGE_DIR` — compare the startup banners |
-| Link active but GET 404 | Owned file missing (storage moved/restored incompletely) |
+| Link active but GET 404 | Owned file missing (storage moved/restored incompletely) — restore the bytes, or check the startup banners |
 | `410 Gone` | Terminal by design: deleted, expired, or download limit consumed |
 | Works locally, dead publicly | `BASE_URL` ≠ funnel URL, Window 4 funnel not started, or Window 3 not running |
 
@@ -700,7 +744,15 @@ management (expiration, download limits incl. a
 real concurrency test with >N parallel GETs against max_downloads=N,
 deletion idempotency, owner-only /delete and /info, metadata privacy,
 unsatisfiable ranges not consuming slots, and the max_downloads database
-migration keeping existing records intact). Because handlers are
+migration keeping existing records intact), and Phase 18 reliability &
+operations (FastAPI/bot/Local Bot API restarts, a wiped staging work dir,
+live-consistent SQLite backup, restoring the database + storage together —
+including to a different location, so no database surgery is needed —
+counters/limits across restarts, a missing owned file giving 404 without
+burning a download and recovering when the bytes return, orphaned and partial
+`.part` files never being served or touched by unrelated deletion, interrupted
+ingestion leaving no broken active record, and expired/deleted records staying
+terminal across a restart). Because handlers are
 transport-free, the same tests pass in both mock and real modes.
 
 ## Public IDs
@@ -765,10 +817,11 @@ be connected after the core project is finalized.
 
 ## Limitations (current milestone)
 
-- **Real end-to-end not yet run here**: the Local Bot API Server is not
-  installed on this machine, so the live Telegram flow is implemented and
-  unit-tested offline, but the actual server + bot verification is pending
-  external setup (see Real Telegram mode above).
+- **Real end-to-end verified (Phase 18)**: the live flow — bot restart plus a
+  real DOCX upload, FastAPI restart plus a full download, Local Bot API Server
+  restart, and staging work-dir loss — was verified on the real Windows
+  deployment (see *Real-machine verification (Phase 18)* above). Mock
+  transport remains the default for development and is fully functional.
 - Mock transport remains the default and is fully functional.
 - Single byte ranges only (no multipart/byteranges); malformed/unsatisfiable
   ranges return 416.
