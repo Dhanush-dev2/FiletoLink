@@ -6,7 +6,11 @@ from app.api.app import CHUNK_SIZE, create_app
 from app.bot.models import Document, Message, User
 from app.database.connection import initialize
 from app.database.files import FileRepository
-from app.services.file_sources import LocalFileSource, TelegramFileSource
+from app.services.file_sources import (
+    LocalFileSource,
+    StorageFileSource,
+    TelegramFileSource,
+)
 from app.services.files import FileService
 from app.utils.ranges import UnsatisfiableRange, parse_range_header
 
@@ -237,10 +241,12 @@ def test_full_download_streams_in_bounded_chunks(tmp_path):
     assert source.last.total_read == size
 
 
-# ── M. both file sources support ranges ────────────────────────────────────
+# ── M. every file source supports ranges ───────────────────────────────────
 
 
-@pytest.mark.parametrize("source_cls", [LocalFileSource, TelegramFileSource])
+@pytest.mark.parametrize(
+    "source_cls", [LocalFileSource, TelegramFileSource, StorageFileSource]
+)
 def test_ranges_work_with_both_file_sources(tmp_path, source_cls):
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -251,6 +257,9 @@ def test_ranges_work_with_both_file_sources(tmp_path, source_cls):
     FileService(repo).save_document(make_message(str(path)))
     if source_cls is TelegramFileSource:
         source = TelegramFileSource(work_dir)
+    elif source_cls is StorageFileSource:
+        # Phase 14B: FileToLink-owned storage is a containment root too.
+        source = StorageFileSource(work_dir)
     else:
         source = LocalFileSource()
     client = TestClient(create_app(repository=repo, file_source=source))

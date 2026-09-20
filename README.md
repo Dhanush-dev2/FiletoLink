@@ -3,9 +3,11 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Milestone 11 (security & abuse protection: per-client rate
-> limiting, security headers, MIME hardening, HEAD+Range).** Everything runs
-> locally at ₹0
+> **Status — Phase 14B (file ownership: FileToLink keeps its own copy of every
+> received file, so downloads no longer depend on the Telegram Local Bot API
+> Server's file storage).** Earlier work: security & abuse protection
+> (per-client rate limiting, security headers, MIME hardening, HEAD+Range).
+> Everything runs locally at ₹0
 > cost. **Mock mode** (no `BOT_TOKEN`, no network) remains the default:
 > `python run.py` gives you a chat loop, sending files yields metadata →
 > SQLite → public id → working download URL via `python run.py --api`. A
@@ -35,10 +37,15 @@ opens link → file is served/downloaded
                  app/bot/handlers.py   (framework-agnostic bot logic)
                        │
                        ▼
-                  SQLite (data/files.db) ← app/database + app/services
-                       │
-                       ▼
-                  Download endpoint (GET /f/{public_id})
+        app/services/storage.py  → FileToLink-owned files
+        (real mode: the received file is transferred out of the        │
+         Local Bot API Server's work dir before any link exists)     │
+                       │                                              │
+                       ▼                                              │
+                  SQLite (data/files.db, source_path in storage)      │
+                       │                                              │
+                       ▼                                              │
+                  Download endpoint (GET /f/{public_id}) ──────────────┘
                        │
                        ▼
                       User
@@ -97,7 +104,8 @@ Never commit it.
 | `TELEGRAM_API_ID` | *(unset)*           | Free api_id for the Local Bot API Server       |
 | `TELEGRAM_API_HASH` | *(unset)*         | Free api_hash for the Local Bot API Server     |
 | `LOCAL_BOT_API_URL` | `http://127.0.0.1:8081` | Your self-hosted Local Bot API Server      |
-| `TELEGRAM_BOT_WORK_DIR` | `telegram_bot_data/` | Server's file storage dir (served files must live here) |
+| `TELEGRAM_BOT_WORK_DIR` | `telegram_bot_data/` | Server's file storage dir (ingestion source, not long-term storage) |
+| `FILE_STORAGE_DIR` | `data/storage/` | FileToLink's **own** storage for received files (must differ from `TELEGRAM_BOT_WORK_DIR`) |
 | `TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS` | `300` | Read timeout for the Local Bot API `getFile` request (large files) |
 | `BASE_URL`     | `http://localhost:8000`| Base URL for generated links (`{BASE_URL}/f/{id}`) |
 | `HOST`         | `127.0.0.1`            | Download API bind host                         |
@@ -141,8 +149,10 @@ python -m app.bot.mock
 The bot connects to a **self-hosted Telegram Local Bot API Server** running
 with `--local`, using **long polling** — no public IP, no webhooks, no TLS
 needed for development. File bytes are never re-downloaded through the
-remote Telegram URL: the local server already stored them, `get_file`
-returns the absolute local path, and the API serves those bytes directly.
+remote Telegram URL: the local server already stored them and `get_file`
+returns the absolute local path. `telegram_bot_data/` is only the
+*ingestion source* — the file is then taken into FileToLink's own storage
+(see **File ownership** below) before any link is created.
 
 ### 1. Create the bot and get credentials
 
@@ -189,6 +199,7 @@ TELEGRAM_API_HASH=deadbeef
 LOCAL_BOT_API_URL=http://127.0.0.1:8081
 TELEGRAM_BOT_WORK_DIR=telegram_bot_data
 TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS=300
+FILE_STORAGE_DIR=data/storage
 
 python run.py --telegram   # or: python run.py (BOT_MODE=real)
 ```
@@ -204,13 +215,64 @@ Telegram user sends file
 python-telegram-bot (base_url + local_mode) receives update
    ↓ normalize_update() → our Message/Document models
 bot.get_file(file_id, read_timeout=...) → absolute local path
-   ↓ FileService.save_document() → SQLite (source_path, public_id)
-   ↓ TelegramFileSource (work-dir enforced) → FastAPI → /f/{public_id}
+   ↓ FileStorage.adopt() → the file is MOVED (or streamed, see below)
+     into FILE_STORAGE_DIR/<public_id>/<filename>; destination verified
+   ↓ FileService.save_document() → SQLite (public_id + owned source_path)
+   ↓ reply with the link (only after the file and the record exist)
+FastAPI → StorageFileSource (FILE_STORAGE_DIR enforced) → /f/{public_id}
 ```
 
-`TelegramFileSource` only serves files physically inside
-`TELEGRAM_BOT_WORK_DIR`: traversal, absolute paths outside the directory,
-and symlinks escaping it are rejected; paths are never shown to users.
+The transfer happens **before** the database record and the public id, so a
+failed transfer creates no link, and an `active` record always has a valid
+FileToLink-owned file. If the transfer fails the user gets an error reply and
+nothing is stored.
+
+Both contained sources share one implementation: `StorageFileSource`
+(FileToLink storage) and `TelegramFileSource` (the Local Bot API work dir)
+only serve files physically inside their own root — traversal, absolute paths
+outside it, and symlinks escaping it are rejected, and filesystem paths are
+never shown to users.
+
+## File ownership (Phase 14B)
+
+The Telegram Local Bot API Server manages the files in its own work
+directory and may evict them at any time. A link that pointed there could
+silently break — a 400+ MB MKV was successfully stored and served, then
+vanished from the server's directory while the database record stayed active.
+
+FileToLink therefore takes ownership of every received file:
+
+- **`FILE_STORAGE_DIR`** (default `data/storage/`) is FileToLink's permanent
+  storage; its layout is one directory per link:
+  `data/storage/<public_id>/<filename>`. It is created when needed and must
+  not be the same directory as `TELEGRAM_BOT_WORK_DIR` (validated at
+  startup).- **A move when it is safe**: if the Telegram file and FileToLink storage are
+  on the same filesystem (the usual case on one Windows drive) the file is
+  moved with an atomic rename — instant, and with no second copy of a 400+ MB
+  file. Otherwise (different drive, or a rename that is not permitted) it is
+  **streamed** in 1 MiB chunks into a `.part` file, size-verified, moved into
+  place, and only then is the source removed. The whole file is never read
+  into memory (`read_bytes()`/`bytes(file)` are not used anywhere).
+- **Never loses the file**: the source is deleted only after the destination
+  is fully written and verified; if the transfer fails, the source stays put
+  and the partial destination is removed.
+- **No orphans**: if the record cannot be written after a successful transfer,
+  the adopted file is rolled back, so no unreferenced file is left in storage.
+- **Disk budget**: FileToLink holds a copy of every file it links to, so
+  reserve space accordingly (a 400 MB upload needs 400 MB in
+  `FILE_STORAGE_DIR`). Metadata stays in SQLite; the bytes never leave your
+  machine — this is local storage, not cloud durability.
+
+### Deleting an owned file
+
+`/delete` soft-deletes the link first (it stops being downloadable
+immediately), then removes the FileToLink-owned file and its link directory.
+Cleanup never touches anything outside `FILE_STORAGE_DIR` — in particular
+never the Local Bot API Server's files — and if the filesystem removal fails
+the deletion still succeeds (the failure is logged internally for diagnosis,
+never exposed and never turned into an API error). Expired or
+fully-downloaded links keep their file; removing it stays an explicit action
+(there is no background cleanup daemon).
 
 ## Running the API (download server)
 
@@ -233,7 +295,8 @@ Notes:
 - The endpoint increments `download_count` once per successful GET (range
   GETs count once; HEAD never counts).
 - The file source is abstracted (`app/services/file_sources.py`): local
-  paths (mock) or the Local Bot API Server's work directory (real mode).
+  paths (mock) or FileToLink-owned storage (real mode); the API never reads
+  the Local Bot API Server's work directory.
 - Lifecycle checks take precedence over range handling: an expired, deleted,
   or exhausted link returns `410 Gone` even when a `Range` header is sent.
 
@@ -272,8 +335,11 @@ no download limit.
 ### Deletion
 
 - Deleting a link sets `status = 'deleted'` and prevents all future
-  downloads (`410 Gone`). Metadata is preserved; physical source files are
-  left untouched in this phase.
+  downloads (`410 Gone`). Metadata is preserved.
+- The FileToLink-owned file (and its link directory) is then removed — see
+  **File ownership → Deleting an owned file**. A mock-mode/operator file
+  outside FileToLink storage is never touched, and a filesystem cleanup
+  failure never turns a successful deletion into an error.
 - Deletion is idempotent and terminal: a deleted link is never reactivated.
 
 ### Lifecycle statuses
@@ -446,15 +512,17 @@ download, do this only on a trusted network.
 `source_path` is set only by the local operator via `send <path>` (or tests),
 never from untrusted remote input, so serving operator-chosen local files is
 the intended local-testing behavior. Real Telegram mode uses
-`TelegramFileSource`, which already enforces the work directory and rejects
-traversal/symlink escapes.
+`StorageFileSource`, which only ever serves files inside `FILE_STORAGE_DIR`
+and rejects traversal/symlink escapes (`TelegramFileSource` enforces the same
+rules for records that still point at the Local Bot API work directory).
 
 ## Database
 
 - **Engine**: Python's built-in `sqlite3` — local file, zero cost, no server.
 - **Location**: `data/files.db` by default; configurable via `DATABASE_PATH`.
   The directory is created automatically on first run.
-- **Files table**: `id`, `public_id` (UNIQUE, filled in on save),
+- **Files table**: `id`, `public_id` (UNIQUE, written together with the row
+  since Phase 14B),
   `telegram_file_id`, `telegram_message_id`, `user_id`, `file_name`,
   `file_size`, `mime_type`, `created_at` (epoch seconds), `expires_at`
   (NULL = never), `download_count` (default 0), `max_downloads` (NULL =
@@ -463,6 +531,10 @@ traversal/symlink escapes.
 - **Migration**: pre-existing databases (without `max_downloads`) get the
   column added automatically on startup; existing records receive
   `max_downloads = NULL` (unlimited) and are otherwise untouched.
+- **`source_path`** is the FileToLink-owned path in real mode (Phase 14B).
+  Records created before that point still point at the Local Bot API Server's
+  work directory (which the server may have evicted); re-send those files
+  through the bot to get FileToLink-owned copies.
 - **Layering**: `app/database/` owns all SQL (connection + schema +
   repository). `app/services/files.py` turns normalized file messages into
   stored records. Bot handlers and the mock transport never touch raw SQL.
@@ -485,10 +557,16 @@ retry, exhaustion), URL generation (format, normalization, validation), and
 the API (valid download with headers + counter, invalid/unknown → 404,
 deleted/expired → 410, missing source → 404, full mock-send → HTTP loop,
 schema migration), and the real Telegram transport (PTB update → normalized
-models incl. missing mime/name/captions, TelegramFileSource containment,
+models incl. missing mime/name/captions, source containment,
 symlink/traversal rejection, config validation, application wiring, and the
 simulated document flow storing + serving bytes — all offline, no token or
-server needed), and link management (expiration, download limits incl. a
+server needed), file ownership (move vs. streamed copy, size verification,
+source removal only after the destination is verified, partial-destination
+cleanup, unreadable/directory/missing sources, duplicate names, path-traversal
+filenames, bounded-chunk streaming of a multi-megabyte file, rollback when the
+record cannot be written, owned-file deletion + cleanup failure, and the
+real-mode API serving/Range/HEAD/lifecycle behaviour on owned files), and link
+management (expiration, download limits incl. a
 real concurrency test with >N parallel GETs against max_downloads=N,
 deletion idempotency, owner-only /delete and /info, metadata privacy,
 unsatisfiable ranges not consuming slots, and the max_downloads database
@@ -567,6 +645,9 @@ be connected after the core project is finalized.
   Rate limiting is per-client (per-process) rather than per-link; there is
   still no signed-URL or per-user authentication beyond the owner check on
   `/delete` and `/info`.
+- Expired or fully-downloaded links keep their FileToLink-owned file until
+  the owner deletes the link (Phase 14B deliberately ships no background
+  cleanup daemon); the file is never served once the link is inactive.
 - A range-size cap is deliberately **not** implemented: a range can never
   return more than the file itself (no amplification), and full large-file
   downloads are the project's purpose — request frequency is what the rate

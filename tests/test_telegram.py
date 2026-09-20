@@ -6,6 +6,7 @@ simulated with a fake bot that returns a local file path.
 import asyncio
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,8 +25,13 @@ from app.config import Settings
 from app.database.connection import initialize
 from app.database.files import FileRepository
 from app.database.records import FileRecord
-from app.services.file_sources import FileSourceError, TelegramFileSource
+from app.services.file_sources import (
+    FileSourceError,
+    StorageFileSource,
+    TelegramFileSource,
+)
 from app.services.files import FileService, make_file_service
+from app.services.storage import FileStorage
 
 USER = User(id=42, username="alice", first_name="Alice")
 
@@ -424,6 +430,43 @@ def test_document_flow_handles_get_file_timeout(tmp_path):
 
 
 def test_document_flow_stores_record_and_serves_bytes(tmp_path):
+    """Real flow (Phase 14B): the file is taken into FileToLink storage and
+    *that* path is recorded — the Local Bot API Server's own file is no longer
+    the download source."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    source_file = work_dir / "report.pdf"
+    source_file.write_bytes(b"%PDF-1.4 fake")
+
+    storage_root = tmp_path / "storage"
+    repo = FileRepository(initialize(":memory:"))
+    service = FileService(repo, FileStorage(storage_root))
+    bot = FakeBot(local_path=str(source_file))
+    update = make_ptb_update(make_ptb_message(document=make_ptb_document()))
+
+    run_async(handle_message_update(bind(update, bot), make_context(bot), service))
+
+    assert bot.sent, "bot should have replied"
+    reply = bot.sent[0]
+    assert "File received" in reply
+    assert "http://localhost:8000/f/" in reply
+    assert str(tmp_path) not in reply  # never expose a filesystem path
+
+    record = repo.get_by_id(1)
+    assert record is not None
+    assert record.public_id is not None
+    assert storage_root in Path(record.source_path).parents
+    assert not source_file.exists()  # ownership transferred away from Telegram
+
+    # The stored record is served by StorageFileSource from FileToLink storage.
+    source = StorageFileSource(storage_root)
+    with source.open(record) as fh:
+        assert fh.read() == b"%PDF-1.4 fake"
+
+
+def test_document_flow_without_storage_records_the_telegram_path(tmp_path):
+    """Without a storage service the transport records the given path as-is
+    (mock mode / callers that inject their own service)."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     source_file = work_dir / "report.pdf"
@@ -436,20 +479,8 @@ def test_document_flow_stores_record_and_serves_bytes(tmp_path):
 
     run_async(handle_message_update(bind(update, bot), make_context(bot), service))
 
-    assert bot.sent, "bot should have replied"
-    reply = bot.sent[0]
-    assert "File received" in reply
-    assert "http://localhost:8000/f/" in reply
-
-    record = repo.get_by_id(1)
-    assert record is not None
-    assert record.source_path == str(source_file)
-    assert record.public_id is not None
-
-    # The stored record is served by TelegramFileSource from the work dir.
-    source = TelegramFileSource(work_dir)
-    with source.open(record) as fh:
-        assert fh.read() == b"%PDF-1.4 fake"
+    assert repo.get_by_id(1).source_path == str(source_file)
+    assert source_file.exists()
 
 
 def test_document_flow_without_local_path_replies_error(tmp_path):

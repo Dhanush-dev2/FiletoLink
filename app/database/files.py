@@ -68,11 +68,15 @@ class FileRepository:
         source_path: str | None = None,
         expires_at: int | None = None,
         max_downloads: int | None = None,
+        public_id: str | None = None,
     ) -> FileRecord:
         """Insert a new file record and return it. ``created_at`` defaults to now.
 
         ``expires_at`` (NULL = never) and ``max_downloads`` (NULL = unlimited)
-        are optional link-management settings.
+        are optional link-management settings. ``public_id`` may be supplied to
+        store the link id in the same INSERT (Phase 14B: the id is generated
+        before the file is taken into FileToLink storage), otherwise it stays
+        NULL and is filled in afterwards.
         """
         if max_downloads is not None and max_downloads < 0:
             raise ValueError(f"max_downloads must be >= 0, got {max_downloads!r}")
@@ -82,8 +86,8 @@ class FileRepository:
                 "INSERT INTO files "
                 "(telegram_file_id, telegram_message_id, user_id, file_name, "
                 " file_size, mime_type, created_at, expires_at, max_downloads, "
-                " source_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " source_path, public_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     telegram_file_id,
                     telegram_message_id,
@@ -95,6 +99,7 @@ class FileRepository:
                     expires_at,
                     max_downloads,
                     source_path,
+                    public_id,
                 ),
             )
         return self.get_by_id(cur.lastrowid)

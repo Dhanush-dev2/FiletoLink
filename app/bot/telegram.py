@@ -7,16 +7,24 @@ This is the only module that touches python-telegram-bot. It:
 - normalizes PTB updates into our framework-agnostic models
   (:mod:`app.bot.models`) so the existing handlers/services/API are reused
   unchanged,
-- resolves the absolute local file path for documents via ``get_file`` and
-  passes it to :class:`~app.services.files.FileService` as ``source_path``
+- resolves the absolute local file path for documents via ``get_file``
   (the Local Bot API Server already stored the bytes locally — nothing is
   re-downloaded through the remote Telegram URL).
+
+Ownership (Phase 14B): the file service this transport builds carries a
+:class:`~app.services.storage.FileStorage`, so the received file is transferred
+into FileToLink-owned storage and *that* path is recorded — the Local Bot API
+Server may clean up its own work directory at any time, so no link may depend
+on it. Order: ``get_file`` → transfer/verify → record + public id → reply. If
+the transfer fails, no record, no public id and no download URL are created and
+the user gets an error reply instead.
 
 Run with: ``python run.py --telegram`` (or ``BOT_MODE=real`` + config).
 """
 import asyncio
 import logging
 import os
+import sqlite3
 import sys
 from dataclasses import replace
 
@@ -25,7 +33,8 @@ from telegram import Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from ..config import Settings, get_settings
-from ..services.files import FileService, make_file_service
+from ..services.files import FileService, PublicIdError, make_file_service
+from ..services.storage import FileStorage, StorageError
 from .handlers import handle_update
 from .models import (
     Document as NormalizedDocument,
@@ -138,7 +147,27 @@ async def handle_message_update(
             normalized, message=replace(message, source_path=local_path)
         )
 
-    reply = handle_update(normalized, file_service)
+    try:
+        reply = handle_update(normalized, file_service)
+    except StorageError:
+        # The file could not be taken into FileToLink-owned storage: no record,
+        # no public id, no download URL — tell the user and stop. Details stay
+        # in the log (they may contain filesystem paths).
+        logger.exception("Could not take ownership of the received file")
+        reply = (
+            "❌ I couldn't copy that file into my own storage, so I did not "
+            "create a link. Check the free space where FileToLink stores "
+            "files (FILE_STORAGE_DIR) and send it again."
+        )
+    except (PublicIdError, sqlite3.Error):
+        # The link could not be recorded (a public id could not be reserved or
+        # the INSERT failed). Anything already adopted was rolled back by the
+        # service, so this is a clean failure with no orphan file.
+        logger.exception("Could not record the received file")
+        reply = (
+            "❌ I couldn't save that file's link, so no download URL was "
+            "created. Please try again."
+        )
     await update.effective_message.reply_text(reply)
 
 
@@ -177,7 +206,8 @@ def build_application(
         raise ValueError("BOT_TOKEN is required to build the real transport")
     base_url = base_url or f"{settings.local_bot_api_url}/bot"
     if file_service is None:
-        file_service = make_file_service()
+        # Real ingestion takes ownership of the bytes (Phase 14B).
+        file_service = make_file_service(storage=FileStorage())
 
     application = (
         Application.builder()
@@ -284,7 +314,9 @@ def run_telegram(settings: Settings | None = None) -> None:
         "Starting real Telegram bot (long polling) against %s",
         settings.local_bot_api_url,
     )
-    application = build_application(file_service=make_file_service())
+    application = build_application(
+        file_service=make_file_service(storage=FileStorage())
+    )
     application.run_polling(allowed_updates=telegram.Update.MESSAGE)
 
 

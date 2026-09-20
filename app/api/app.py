@@ -35,6 +35,12 @@ Abuse protection & hardening (Phase 11):
 - ``HEAD`` mirrors the matching GET status/headers (``200``/``206``/``416``)
   with no body and without consuming a download slot.
 
+Storage ownership (Phase 14B): records store the FileToLink-owned path
+(``FILE_STORAGE_DIR``), so this layer stays unaware of where the bytes came
+from: it resolves a record through the repository and reads it through a
+:class:`FileSource`. A link whose owned file is gone returns ``404`` rather
+than serving anything else.
+
 Run it with:
     python run.py --api
     # or: uvicorn --factory app.api.app:create_app --host 127.0.0.1 --port 8000
@@ -55,7 +61,7 @@ from ..services.file_sources import (
     FileSource,
     FileSourceError,
     LocalFileSource,
-    TelegramFileSource,
+    StorageFileSource,
 )
 from ..utils.mime import resolve_content_type
 from ..utils.public_ids import PUBLIC_ID_LENGTH, is_valid_public_id
@@ -284,10 +290,13 @@ def create_app(
     if repository is None:
         repository = FileRepository(initialize())
     if file_source is None:
-        # Real mode serves the Local Bot API Server's files (work-dir
-        # enforced); mock mode serves the paths the mock transport recorded.
+        # Real mode serves FileToLink-owned files (FILE_STORAGE_DIR enforced —
+        # Phase 14B records point there, never at the Local Bot API Server's
+        # work dir); mock mode serves the paths the mock transport recorded.
         file_source = (
-            TelegramFileSource() if settings.bot_mode == "real" else LocalFileSource()
+            StorageFileSource(settings.file_storage_dir)
+            if settings.bot_mode == "real"
+            else LocalFileSource()
         )
     if rate_limiter is None and settings.rate_limit_enabled:
         rate_limiter = RateLimiter(

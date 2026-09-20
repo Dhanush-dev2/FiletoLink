@@ -95,6 +95,10 @@ class Settings:
             _get_optional("LOCAL_BOT_API_URL") or "http://127.0.0.1:8081"
         ).rstrip("/")
         self.telegram_bot_work_dir: str = self._resolve_work_dir()
+        # Phase 14B: FileToLink's *own* storage for received files. The Local
+        # Bot API Server may clean up its work dir at any time, so the bytes
+        # of an active link must live under this directory instead.
+        self.file_storage_dir: str = self._resolve_file_storage_dir()
         # Phase 14A: read timeout for the Local Bot API ``getFile`` request.
         # Large files (hundreds of MB) can make the request take far longer
         # than PTB's small default, so it gets its own configurable timeout.
@@ -129,6 +133,21 @@ class Settings:
         raw = _get_optional("TELEGRAM_BOT_WORK_DIR")
         if not raw:
             return str(PROJECT_ROOT / "telegram_bot_data")
+        path = Path(raw)
+        return str(path if path.is_absolute() else PROJECT_ROOT / path)
+
+    def _resolve_file_storage_dir(self) -> str:
+        """FileToLink-owned file storage (Phase 14B).
+
+        FILE_STORAGE_DIR env var, or ``data/storage`` under the project root.
+        Deliberately *not* ``TELEGRAM_BOT_WORK_DIR``: that directory is managed
+        by the Local Bot API Server (which may evict files at any time), while
+        this one is owned by FileToLink and must survive as long as a link does.
+        Relative paths resolve against the project root.
+        """
+        raw = _get_optional("FILE_STORAGE_DIR")
+        if not raw:
+            return str(PROJECT_ROOT / "data" / "storage")
         path = Path(raw)
         return str(path if path.is_absolute() else PROJECT_ROOT / path)
 
@@ -172,11 +191,25 @@ class Settings:
             raise ValueError(
                 "TELEGRAM_GET_FILE_READ_TIMEOUT_SECONDS must be >= 1"
             )
+        if self._same_path(self.file_storage_dir, self.telegram_bot_work_dir):
+            raise ValueError(
+                "FILE_STORAGE_DIR must not be TELEGRAM_BOT_WORK_DIR: FileToLink "
+                "storage is its own permanent copy, while the Local Bot API "
+                "Server may clean up its work directory at any time"
+            )
         if self.trust_proxy_headers and not self.trusted_proxies:
             raise ValueError(
                 "TRUST_PROXY_HEADERS is enabled but TRUSTED_PROXIES is empty; "
                 "list the proxy IP addresses whose X-Forwarded-For may be trusted"
             )
+
+    @staticmethod
+    def _same_path(first: str, second: str) -> bool:
+        """Whether two configured directories resolve to the same location."""
+        try:
+            return Path(first).resolve() == Path(second).resolve()
+        except OSError:  # unreadable/odd path: fall back to a lexical compare
+            return os.path.normcase(first) == os.path.normcase(second)
 
     @property
     def is_mock(self) -> bool:
