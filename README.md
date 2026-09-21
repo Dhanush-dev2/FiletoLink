@@ -10,6 +10,10 @@ link that can be used to access/download those files.
 > evidence-based diagnostics playbook — see *Long-running operation (Phase 19)*
 > below). No service manager, scheduler, container, or paid component was
 > added; every process still runs in a visible console window.
+> The complete public path was then verified by hand on that deployment —
+> Telegram upload → FileToLink-owned storage → FastAPI → Tailscale Funnel →
+> the public Internet → a phone on mobile data (see *Public-link verification
+> (Phase 19)* below).
 > Phase 18 (reliability & operations: restart, backup/restore, and
 > missing/orphaned-file recovery are verified end-to-end, and a backup restored
 > to a *different* folder, drive, or machine keeps every public link working
@@ -457,6 +461,30 @@ All real-machine operational checks for Parts 2–5 of the Phase 18 plan PASS.
 Links survived every restart — including the destruction of the Local Bot API
 Server's staging work dir — because downloads are served exclusively from
 FileToLink-owned storage; the staging dir is only an ingestion source.
+
+### Public-link verification (Phase 19 real deployment)
+
+The complete public path was verified by hand on the real Windows deployment
+after the Phase 19 work, using a fresh PDF upload — Telegram → FileToLink-owned
+storage → FastAPI (:8000) → Tailscale Funnel → the public Internet → a phone on
+mobile data:
+
+| Check | Procedure | Result |
+|---|---|---|
+| Public link generated | Upload a fresh PDF through the bot (Window 2) | PASS — the reply carried a `{BASE_URL}/f/{public_id}` link; 97,328 bytes stored |
+| Public `HEAD` | `curl -I <funnel URL>/f/<public_id>` from Window 5 | PASS — `HTTP 200`, `Content-Length: 97328`, `Content-Type: application/pdf` |
+| Public full download | `curl -o … <funnel URL>/f/<public_id>` from Window 5 | PASS — exactly 97,328 bytes |
+| Off-network phone | Wi-Fi off, mobile data on; open the same URL on a phone | PASS — the PDF downloaded over mobile data |
+
+This is the first check that leaves the machine, so it exercises the funnel and
+`BASE_URL` rather than only the app. Two configuration points decide whether it
+works, both covered above: `BASE_URL` must be the funnel host (see *Tailscale
+Funnel (Window 4)*), and `HOST` stays `127.0.0.1` because the funnel connects
+from localhost. A malformed `.env` line (stray quotes or whitespace around
+`KEY=value`) is the other trap: the value is not parsed as written, so
+`BASE_URL` keeps its `http://localhost:8000` default, the generated link still
+works *on this machine*, and only a fetch from another network reveals the
+mistake — the failure the "works locally, dead publicly" row below describes.
 
 ### Troubleshooting
 
@@ -1029,6 +1057,10 @@ be connected after the core project is finalized.
   restart, and staging work-dir loss — was verified on the real Windows
   deployment (see *Real-machine verification (Phase 18)* above). Mock
   transport remains the default for development and is fully functional.
+- **Public path verified (Phase 19)**: the same deployment served a real upload
+  over Tailscale Funnel — a public `HEAD` and a full download matching the
+  stored byte count, and the same link downloaded by a phone on mobile data
+  with Wi-Fi off (see *Public-link verification (Phase 19)* above).
 - Mock transport remains the default and is fully functional.
 - Single byte ranges only (no multipart/byteranges); malformed/unsatisfiable
   ranges return 416.
