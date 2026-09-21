@@ -51,7 +51,7 @@ opens link → file is served/downloaded
                        │
                        ▼
              Telegram transport ──┐
-        (mock today, real later)  │
+        (mock or real transport)  │
                        │          │
                        ▼          ▼
                  app/bot/handlers.py   (framework-agnostic bot logic)
@@ -73,9 +73,9 @@ opens link → file is served/downloaded
 
 The key design choice: bot logic (`app/bot/handlers.py`) only sees normalized
 update objects (`app/bot/models.py`). The **mock transport**
-(`app/bot/mock.py`) and the future **real integration** (`python-telegram-bot`
-polling) both plug into the same handlers, so switching to the real bot later
-does not touch any bot logic.
+(`app/bot/mock.py`) and the real **Telegram transport** (`python-telegram-bot`
+polling) both plug into the same handlers, so neither transport changes any
+bot logic.
 
 ### Why this is zero-cost
 
@@ -329,7 +329,7 @@ operational runbook: what runs, in what order, and how to recover.
 ### Prerequisites
 
 - Python 3.12 with the project's `.venv` (`pip install -r requirements.txt`)
-- Git (`.env` and `data/` stay untracked)
+- Git (`.env`, `data/`, and the Local Bot API staging dir stay untracked)
 - Real Telegram mode only: a Local Bot API Server binary
   (`tdlib/telegram-bot-api`, built natively or inside WSL2) and Tailscale for
   the public funnel
@@ -495,7 +495,7 @@ mistake — the failure the "works locally, dead publicly" row below describes.
 | Bot exits: "LOCAL_BOT_API_URL must be an absolute http(s) URL" | Typo in `.env` (missing scheme/port) — validated at startup instead of surfacing as "unreachable" |
 | `run.py --api` exits: "Cannot open the SQLite database at …" | `DATABASE_PATH` is a directory, an unreadable location, or a missing drive |
 | `/health` → 503 | The named component is unusable: `database` (path/moved file) or `storage` (missing/unwritable `FILE_STORAGE_DIR`) |
-| `tailscale funnel status` → "No serve config" | Window 4 is not publishing; run `tailscale funnel 8000` (public links are down, local links are fine) |
+| `tailscale funnel status` → "No serve config" | Not proof the funnel is down — a working *foreground* funnel prints this line too (observed). Check `tailscale funnel status --json`: no `Foreground` entry means Window 4 is not publishing (run `tailscale funnel 8000`; public links down, local links fine) |
 | Bot exits listing `BOT_TOKEN`/`TELEGRAM_API_*` | `.env` incomplete for real mode; mock mode still works (`python run.py`) |
 | `run.py --api`: bind error 10048 | Port already in use — another API instance is running, or `PORT` conflicts |
 | Links 404 after a restart | Bot and API resolved different `DATABASE_PATH`/`FILE_STORAGE_DIR` — compare the startup banners |
@@ -616,8 +616,10 @@ tailscale funnel off           # stop publishing
 ```
 
 - **Running?** `tailscale funnel status --json` shows a `Foreground` entry
-whose `Proxy` is `http://127.0.0.1:8000`. Plain `tailscale funnel status`
-prints `No serve config` when nothing is published.
+whose `Proxy` is `http://127.0.0.1:8000` — this is the authoritative check.
+Plain `tailscale funnel status` is not: a working foreground funnel was
+observed to print `No serve config` as well, so never read that line as
+"public links are down".
 - **`BASE_URL` is what makes the funnel useful.** Generated links are
 `{BASE_URL}/f/{public_id}`, so with the default
 `BASE_URL=http://127.0.0.1:8000` links are *local-only* even while the funnel

@@ -17,6 +17,11 @@ data/
 *.db
 *.sqlite3
 
+# Telegram Local Bot API Server staging (TELEGRAM_BOT_WORK_DIR; default
+# telegram_bot_data/) — disposable received-file staging, never application
+# storage; FileToLink keeps its own copy under data/storage (Phase 14B)
+telegram_bot_data/
+
 # Local backups (scripts/backup.py) — never committed
 backups/
 
