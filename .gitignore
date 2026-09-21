@@ -17,6 +17,9 @@ data/
 *.db
 *.sqlite3
 
+# Local backups (scripts/backup.py) — never committed
+backups/
+
 # OS / editor
 .DS_Store
 Thumbs.db

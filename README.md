@@ -3,7 +3,14 @@
 A zero-cost Telegram bot that receives files from users and generates a public
 link that can be used to access/download those files.
 
-> **Status — Phase 18** (reliability & operations: restart, backup/restore, and
+> **Status — Phase 19** (long-running operation on the one Windows machine:
+> verified dependency/startup/shutdown order, a secret-free logging path
+> (the Local Bot API URL used to print `BOT_TOKEN` at INFO), a `GET /health`
+> check that never burns a download slot, a one-command backup script, and an
+> evidence-based diagnostics playbook — see *Long-running operation (Phase 19)*
+> below). No service manager, scheduler, container, or paid component was
+> added; every process still runs in a visible console window.
+> Phase 18 (reliability & operations: restart, backup/restore, and
 > missing/orphaned-file recovery are verified end-to-end, and a backup restored
 > to a *different* folder, drive, or machine keeps every public link working
 > with no manual database surgery — see *Deployment & operations* below).
@@ -297,6 +304,7 @@ local path recorded at send time — so links keep working across restarts.
 ```bash
 curl -i http://localhost:8000/f/t9obSSQq      # 200 + file bytes
 curl -i http://localhost:8000/f/doesNotExist  # 404
+curl -i http://localhost:8000/health          # 200: process + database + storage
 ```
 
 Notes:
@@ -331,7 +339,7 @@ operational runbook: what runs, in what order, and how to recover.
 | 2 | FileToLink bot (long polling) | `scripts\start_bot.bat` | Window 1 (pings it, exits if unreachable) |
 | 3 | FastAPI download server | `scripts\start_api.bat` | SQLite + FileToLink storage only |
 | 4 | Tailscale Funnel | `tailscale funnel 8000` (publishes HOST:PORT) | Window 3 |
-| 5 | Testing / commands | `pytest`, `curl`, a Telegram client | — |
+| 5 | Testing / commands | `pytest`, `curl`, `tailscale`, `sqlite`, `curl /health` | — |
 
 **Startup order: 1 → 2 → 3 → 4 → 5.** Windows 2 and 3 are independent of
 each other; Window 4 must come after 3. The scripts run in the foreground of
@@ -399,7 +407,9 @@ operator machine. Symlink tests skip where Windows lacks the privilege.
 
 ### Backup basics
 
-Back up exactly two things, together:
+For a one-command backup, use `scripts\backup.py` (see *Long-running
+operation (Phase 19)* → *Backup & restore*). To do it by hand, back up exactly
+two things, together:
 
 1. `data/files.db` — all metadata: links, owners, counters, lifecycle state
 2. `data/storage/` — the bytes those links point to
@@ -452,13 +462,201 @@ FileToLink-owned storage; the staging dir is only an ingestion source.
 
 | Symptom | Cause / fix |
 |---|---|
-| Bot exits: "Cannot reach the Local Bot API Server" | Window 1 not running, or `LOCAL_BOT_API_URL` wrong — start Window 1 first |
+| Bot exits: "Cannot reach the Local Bot API Server" | Window 1 not running, or `LOCAL_BOT_API_URL` wrong — start Window 1 first. The failure class is printed (`NetworkError`, …) |
+| Bot exits: "rejected BOT_TOKEN" | The server answered and refused the credentials — the token is wrong or was revoked at @BotFather. Not a connectivity problem |
+| Bot exits: "LOCAL_BOT_API_URL must be an absolute http(s) URL" | Typo in `.env` (missing scheme/port) — validated at startup instead of surfacing as "unreachable" |
+| `run.py --api` exits: "Cannot open the SQLite database at …" | `DATABASE_PATH` is a directory, an unreadable location, or a missing drive |
+| `/health` → 503 | The named component is unusable: `database` (path/moved file) or `storage` (missing/unwritable `FILE_STORAGE_DIR`) |
+| `tailscale funnel status` → "No serve config" | Window 4 is not publishing; run `tailscale funnel 8000` (public links are down, local links are fine) |
 | Bot exits listing `BOT_TOKEN`/`TELEGRAM_API_*` | `.env` incomplete for real mode; mock mode still works (`python run.py`) |
 | `run.py --api`: bind error 10048 | Port already in use — another API instance is running, or `PORT` conflicts |
 | Links 404 after a restart | Bot and API resolved different `DATABASE_PATH`/`FILE_STORAGE_DIR` — compare the startup banners |
 | Link active but GET 404 | Owned file missing (storage moved/restored incompletely) — restore the bytes, or check the startup banners |
 | `410 Gone` | Terminal by design: deleted, expired, or download limit consumed |
 | Works locally, dead publicly | `BASE_URL` ≠ funnel URL, Window 4 funnel not started, or Window 3 not running |
+
+### Long-running operation (Phase 19)
+
+Everything above is for one operator on one Windows machine. This part is what
+to check before leaving FileToLink running for hours or days — and what each
+component failure looks like.
+
+#### Dependency graph (verified on the real deployment)
+
+```
+Window 1  Local Bot API Server  (:8081, host-only)
+              │
+              ▼
+Window 2  FileToLink bot  (long polling)          ── new Telegram ingestion
+
+Window 3  FastAPI  (:8000)  ── owns SQLite + FILE_STORAGE_DIR
+              │
+              ▼
+Window 4  Tailscale Funnel  (:443 → 127.0.0.1:8000) ── public links
+
+Window 5  testing / commands  (pytest, curl, tailscale, sqlite)
+```
+
+- **Serving an existing link needs Window 3 only.** Windows 1 and 2 can be
+down; downloads never touch the Local Bot API work directory (Phase 14B).
+- **New Telegram ingestion needs Window 1 + Window 2.**
+- **Public access needs Window 3 + Window 4.** Local access needs Window 3.
+- Window 4 publishes **:8000 only** — never funnel :8081 (plain HTTP, and it
+  must stay on this machine).
+
+#### What a component failure looks like
+
+| Stopped | Existing links | New uploads | Public links | Local links |
+|---|---|---|---|---|
+| Window 1 (Local Bot API) | keep working | fail (bot cannot fetch the file) | unaffected | unaffected |
+| Window 2 (bot) | keep working | fail until restarted (long polling resumes; queued updates are re-delivered) | unaffected | unaffected |
+| Window 3 (FastAPI) | unavailable while down; files/database untouched | ingested and stored, but no link can be served yet | fail | fail |
+| Window 4 (Funnel) | unaffected | unaffected | fail (`BASE_URL` unreachable) | unaffected |
+
+Expect these. A dependency failure is not a bug: each one is reported by the
+failing component itself (Window 2 exits with an actionable message when
+Window 1 is missing, wrong BOT_TOKEN, or unreachable) and recovers by starting
+the missing window again.
+
+#### Health check
+
+```bash
+curl -i http://127.0.0.1:8000/health
+# 200 {"status":"ok","database":"ok","storage":"ok"}
+# 503 {"status":"error","database":"ok","storage":"error"}
+```
+
+- 200 = this process is serving, the configured SQLite file opens and carries
+the schema, and `FILE_STORAGE_DIR` exists or can be created. 503 names the
+failing component and nothing else — no secrets, no paths, no rows.
+- It **never touches a record**, so checking it cannot burn a `max_downloads`
+slot (a real download can). Use it instead of fetching a link to test Window 3.
+- Independent of Telegram and Window 1 by design: serving links needs neither.
+- It is rate limited like any other public route, so polling it more than
+`RATE_LIMIT_REQUESTS` times per window returns `429`.
+
+#### Logging (console only, secret-free)
+
+- **No log files are created anywhere** — every process logs to the console of
+its own window. There is nothing to rotate and no logging framework beyond the
+standard library; use the window's scrollback, or redirect with `>` if you want
+a file (your choice, not the app's).
+- **`BOT_TOKEN` never reaches the log.** The Local Bot API request URL embeds
+the token (`<LOCAL_BOT_API_URL>/bot<TOKEN>/<method>`), and `httpx` logs every
+request URL at `INFO` — which is exactly how earlier real runs printed the
+token. `app/utils/logging_setup.py` now (a) raises the `httpx`/`httpcore`
+loggers to `WARNING` and (b) attaches a redaction filter to the process's root
+handlers, so even a token appearing in a third-party record at any level is
+masked as `<redacted>` before it is written.
+- Startup banners print configuration that is *not* secret (bot mode, database
+path, storage path); configuration errors never include secret values.
+
+#### Backup & restore (one command)
+
+```bash
+.venv\Scripts\python.exe scripts\backup.py
+# → backups/20260921-120000/{files.db, storage/, MANIFEST.txt}
+.venv\Scripts\python.exe scripts\backup.py --dest D:\filetolink-backups\weekly
+.venv\Scripts\python.exe scripts\backup.py --force   # write into an existing directory
+```
+
+- Copies **both halves of the application state together** — a live-consistent
+SQLite snapshot (SQLite's online backup API, so Window 2/3 may keep running)
+and the FileToLink-owned storage tree — preserving the
+`<public_id>/<filename>` layout the database resolves against.
+- Copies **nothing else**: no `.env` (it refuses outright if `FILE_STORAGE_DIR`
+would contain one), no `TELEGRAM_BOT_WORK_DIR` (Local Bot API staging), no
+logs. A stub `MANIFEST.txt` records the timestamp, record counts, storage file
+count/bytes, and what was excluded.
+- Never overwrites an existing backup silently: a non-empty destination is
+refused with exit code 2 unless `--force` is given. Exit 0 = success, 1 =
+failure, 2 = refused.
+- **Restore** = copy both halves back *together* while Window 2 and Window 3
+are stopped: `files.db` over `DATABASE_PATH`, `storage/` over
+`FILE_STORAGE_DIR`. Links then work again, including at a different folder,
+drive, or machine (Phase 18).
+- `backups/` is git-ignored. No scheduler is installed — run it by hand, or
+wire it into Windows Task Scheduler yourself if you want it automatic.
+
+#### Tailscale Funnel (Window 4)
+
+```bash
+tailscale funnel 8000          # start (foreground; Ctrl+C stops it)
+tailscale funnel status        # is anything published?
+tailscale funnel status --json # the exact mapping ("Proxy": "http://127.0.0.1:8000")
+tailscale funnel off           # stop publishing
+```
+
+- **Running?** `tailscale funnel status --json` shows a `Foreground` entry
+whose `Proxy` is `http://127.0.0.1:8000`. Plain `tailscale funnel status`
+prints `No serve config` when nothing is published.
+- **`BASE_URL` is what makes the funnel useful.** Generated links are
+`{BASE_URL}/f/{public_id}`, so with the default
+`BASE_URL=http://127.0.0.1:8000` links are *local-only* even while the funnel
+is up. Set `BASE_URL` to the funnel host shown by
+`tailscale funnel status` (e.g. `https://<machine>.<tailnet>.ts.net`) to hand
+out publicly usable links — then check the local URL first when a public link
+fails.
+- Changing `BASE_URL` affects only newly generated links: stored files and
+public ids are untouched, and the id is generated independently of the
+hostname (never hard-code your Tailscale hostname in the project — keep it in
+`.env`).
+- Funnel publishes **:8000 only**. Public links work only while Window 3 *and*
+Window 4 are up; stopping Window 4 leaves local links working.
+- Phase 19 deliberately leaves the funnel in the **foreground** (no `--bg`, no
+service). If your foreground funnel has been reliable, keep it that way.
+
+#### Diagnostics playbook
+
+**Bot not receiving files** (nothing arrives in Telegram):
+1. Window 2 running? Its console shows the startup banner or an exit reason.
+2. If it exited: the message says whether the Local Bot API Server was
+   unreachable (start Window 1) or **rejected `BOT_TOKEN`** (a credential
+   problem — re-check the token with @BotFather; this is *not* a connectivity
+   issue).
+3. Window 1 running and listening on `LOCAL_BOT_API_URL` (`netstat -ano | grep
+   8081`)? Its window shows its own errors (wrong `api_id`/`api_hash`, port in
+   use).
+4. Configuration: `BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`,
+   `LOCAL_BOT_API_URL`, and `TELEGRAM_BOT_WORK_DIR` matching Window 1's `--dir`.
+5. Logs: the bot window prints one line per failure; tokens are redacted.
+
+**Local link not working** (`http://127.0.0.1:8000/f/<id>`):
+1. Window 3 running, and `curl -i http://127.0.0.1:8000/health` → 200?
+2. `health` naming `database` → `DATABASE_PATH` wrong/DB moved (Window 3 prints
+   its resolved database path at startup).
+3. `health` naming `storage` → `FILE_STORAGE_DIR` missing/unwritable.
+4. `404` for the link itself → the owned file is missing (restore the bytes) or
+   the public id is wrong; `410` → deleted/expired/download limit reached, by
+   design.
+5. Compare Window 2's and Window 3's startup banners: a `DATABASE_PATH` or
+   `FILE_STORAGE_DIR` mismatch is the classic "bot stores here, API serves
+there" failure.
+
+**Public link not working** (the `{BASE_URL}/f/<id>` you sent someone):
+1. Does the *local* URL work? If not, it is not a funnel problem.
+2. Window 3 running (above).
+3. Window 4 running — `tailscale funnel status --json` shows the `Proxy`.
+4. `BASE_URL` equals the funnel URL (default `http://127.0.0.1:8000` is
+   local-only, and links already sent keep the old hostname).
+5. Local first, then public: that ordering isolates Funnel from the app.
+
+**New uploads fail but old links work** → the ingestion side (Window 1 and
+Window 2), not storage or serving. Serving never touches the Local Bot API work
+directory; check the bot window's message, then Window 1.
+
+**After a Windows restart** (no reboot test was performed in Phase 19 — this
+is the expected sequence): start `scripts\start_bot_api_server.bat`, then
+`scripts\start_bot.bat`, then `scripts\start_api.bat`, then `tailscale funnel
+8000`; compare the Window 2/Window 3 banners, then `curl /health` and fetch one
+old link. Nothing is installed to auto-start these — by design.
+
+#### Deliberately not installed
+
+No Windows service, no Task Scheduler entry, no background funnel, no log
+rotation, no monitoring, no containers, no Redis/PostgreSQL, no cloud storage.
+The app is a bot process, an API process, a SQLite file, and a storage
+directory.
 
 ### Deployment security notes
 
@@ -752,7 +950,13 @@ counters/limits across restarts, a missing owned file giving 404 without
 burning a download and recovering when the bytes return, orphaned and partial
 `.part` files never being served or touched by unrelated deletion, interrupted
 ingestion leaving no broken active record, and expired/deleted records staying
-terminal across a restart). Because handlers are
+terminal across a restart), and Phase 19 operations (health-endpoint semantics
+and its refusal to consume a download slot, token redaction reaching root
+handlers, quieted request-URL loggers, the credential-vs-connectivity startup
+messages, invalid `LOCAL_BOT_API_URL` and unusable `DATABASE_PATH` failing fast
+without a traceback, and the backup script: both halves present, byte-identical
+storage, no `.env`/staging data, no silent overwrite, and a restore that still
+serves the links). Because handlers are
 transport-free, the same tests pass in both mock and real modes.
 
 ## Public IDs
@@ -811,6 +1015,9 @@ same normalization for live Telegram updates, so both transports share
 14. Testing
 15. ✅ Deployment readiness & reproducible operations (config, scripts,
     restart/backup runbook)
+16. ✅ Long-running operation & deployment hardening (Phase 19: dependency
+    graph, failure matrix, `/health`, secret-free logging, one-command backup,
+    diagnostics playbook)
 
 Each milestone ends in a working, testable state. The real Telegram bot will
 be connected after the core project is finalized.

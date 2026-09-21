@@ -175,6 +175,16 @@ class Settings:
                 "BASE_URL must be an absolute http(s) URL, "
                 f"got {self.base_url!r}"
             )
+        # The Local Bot API URL is used directly as PTB's base_url. A typo
+        # (missing scheme, stray space) used to surface only as "cannot reach
+        # the Local Bot API Server", pointing the operator at Window 1 instead
+        # of at the configuration (Phase 19).
+        parsed_api = urlsplit(self.local_bot_api_url)
+        if parsed_api.scheme.lower() not in {"http", "https"} or not parsed_api.netloc:
+            raise ValueError(
+                "LOCAL_BOT_API_URL must be an absolute http(s) URL "
+                f"(e.g. http://127.0.0.1:8081), got {self.local_bot_api_url!r}"
+            )
         if not self.host or any(ch in self.host for ch in "/ \t"):
             raise ValueError(
                 f"HOST must be a host name or IP address, got {self.host!r}"

@@ -41,12 +41,19 @@ from: it resolves a record through the repository and reads it through a
 :class:`FileSource`. A link whose owned file is gone returns ``404`` rather
 than serving anything else.
 
+Operational health (Phase 19): ``GET /health`` reports whether this process,
+its SQLite database, and its storage root are available — component states
+only, never configuration, credentials, or data. It exists so an operator can
+confirm Window 3 is serving without consuming a download slot on a real link.
+
 Run it with:
     python run.py --api
     # or: uvicorn --factory app.api.app:create_app --host 127.0.0.1 --port 8000
 """
 import os
+import sqlite3
 import time
+from pathlib import Path
 from typing import BinaryIO, Iterator
 from urllib.parse import quote
 
@@ -54,7 +61,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..config import Settings, get_settings
-from ..database.connection import initialize
+from ..database.connection import connect, initialize
 from ..database.files import FileRepository
 from ..database.records import FileRecord
 from ..services.file_sources import (
@@ -139,6 +146,35 @@ def _content_headers(
     if content_range:
         headers["Content-Range"] = content_range
     return headers
+
+
+def _database_available(database_path: str) -> bool:
+    """Whether the configured SQLite file opens and carries the files schema."""
+    try:
+        conn = connect(database_path)
+    except (sqlite3.Error, OSError):
+        return False
+    try:
+        conn.execute("SELECT COUNT(*) FROM files").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _storage_available(file_storage_dir: str) -> bool:
+    """Whether FileToLink's own storage root exists (or can be created).
+
+    Creating it is exactly what the first ingestion would do, so a fresh
+    deployment reports healthy instead of failing its own health check.
+    """
+    path = Path(file_storage_dir)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return path.is_dir()
 
 
 def _error(
@@ -395,6 +431,46 @@ def create_app(
         if response.status_code >= 400:
             repository.release_download_slot(record.id)
         return response
+
+    @app.get("/health")
+    def health(request: Request) -> Response:
+        """Liveness of this process plus the two local dependencies it reads.
+
+        Semantics (Phase 19): ``200`` when the app, its SQLite database, and
+        its FileToLink storage root are available; ``503`` with the failing
+        component named otherwise. It reports component *state* only — never
+        secrets, filesystem contents, database contents, Telegram
+        credentials, or configuration values — and it deliberately does not
+        depend on Telegram or on the Local Bot API Server: serving existing
+        links needs neither.
+
+        Operators should check here rather than fetching a link: a real
+        download consumes a download slot (and burns ``max_downloads``-limited
+        links), while ``/health`` never touches a record.
+        """
+        if rate_limiter is not None:
+            allowed, retry_after = rate_limiter.check(client_key(request, settings))
+            if not allowed:
+                return _error(
+                    429,
+                    "Too many requests",
+                    is_head=False,
+                    headers={"Retry-After": str(retry_after)},
+                )
+
+        checks = {
+            "database": _database_available(settings.database_path),
+            "storage": _storage_available(settings.file_storage_dir),
+        }
+        healthy = all(checks.values())
+        return JSONResponse(
+            status_code=200 if healthy else 503,
+            content={
+                "status": "ok" if healthy else "error",
+                **{name: ("ok" if ok else "error") for name, ok in checks.items()},
+            },
+            headers=_headers(),
+        )
 
     @app.get("/f/{public_id}")
     def download(public_id: str, request: Request) -> Response:

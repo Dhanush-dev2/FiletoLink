@@ -35,6 +35,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from ..config import Settings, get_settings
 from ..services.files import FileService, PublicIdError, make_file_service
 from ..services.storage import FileStorage, StorageError
+from ..utils.logging_setup import configure_logging
 from .handlers import handle_update
 from .models import (
     Document as NormalizedDocument,
@@ -271,8 +272,19 @@ def validate_real_config(settings: Settings | None = None) -> list[str]:
     return errors
 
 
-def _ping_local_server(url: str, token: str) -> bool:
-    """Check the Local Bot API Server is reachable (getMe). No secrets logged."""
+# Errors that mean the server answered but rejected our credentials — a very
+# different operator action from "the server is not running" (Phase 19: an
+# expired/incorrect BOT_TOKEN used to be reported as "cannot reach the server",
+# pointing the operator at the wrong window).
+_CREDENTIAL_ERRORS = frozenset({"InvalidToken", "Unauthorized", "Forbidden"})
+
+
+def _ping_local_server(url: str, token: str) -> tuple[bool, str | None]:
+    """Check the Local Bot API Server is reachable *and* accepts our token.
+
+    Returns ``(ok, failure)`` where ``failure`` is the exception *class name*
+    (never the message, which can embed the token, and never the token).
+    """
 
     async def _ping() -> None:
         async with Bot(token, base_url=f"{url}/bot", local_mode=True) as bot:
@@ -280,10 +292,11 @@ def _ping_local_server(url: str, token: str) -> bool:
 
     try:
         asyncio.run(_ping())
-        return True
-    except Exception as exc:  # noqa: BLE001 - any failure = unreachable
-        logger.info("Local Bot API Server ping failed: %s", exc.__class__.__name__)
-        return False
+        return True, None
+    except Exception as exc:  # noqa: BLE001 - any failure = not usable
+        failure = exc.__class__.__name__
+        logger.info("Local Bot API Server ping failed: %s", failure)
+        return False, failure
 
 
 def run_telegram(settings: Settings | None = None) -> None:
@@ -297,19 +310,30 @@ def run_telegram(settings: Settings | None = None) -> None:
         print("\nMock mode still works: python run.py")
         sys.exit(1)
 
-    if not _ping_local_server(settings.local_bot_api_url, settings.bot_token):
-        print(
-            f"❌ Cannot reach the Local Bot API Server at "
-            f"{settings.local_bot_api_url}.\n"
-            "   Start it with --local first (see README → Local Bot API "
-            "Server setup), then retry."
-        )
+    reachable, failure = _ping_local_server(
+        settings.local_bot_api_url, settings.bot_token
+    )
+    if not reachable:
+        if failure in _CREDENTIAL_ERRORS:
+            print(
+                f"❌ The Local Bot API Server at {settings.local_bot_api_url} "
+                f"rejected BOT_TOKEN ({failure}).\n"
+                "   Check that BOT_TOKEN in .env is the current token for this "
+                "bot — @BotFather can revoke and re-issue it. (This is a "
+                "credential problem, not a connectivity one.)"
+            )
+        else:
+            print(
+                f"❌ Cannot reach the Local Bot API Server at "
+                f"{settings.local_bot_api_url} ({failure}).\n"
+                "   Start it with --local first (see README → Local Bot API "
+                "Server setup), then retry."
+            )
         sys.exit(1)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # Secret-free console logging: request URLs are suppressed and tokens are
+    # redacted (the Local Bot API URL embeds BOT_TOKEN).
+    configure_logging()
     logger.info(
         "Starting real Telegram bot (long polling) against %s",
         settings.local_bot_api_url,

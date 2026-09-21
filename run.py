@@ -8,11 +8,13 @@ Use ``python run.py --api`` to start the FastAPI download server instead.
 """
 import argparse
 import ipaddress
+import sqlite3
 
 from app.bot import mock
 from app.bot.mock import repl
 from app.config import get_settings
 from app.utils.console import ensure_utf8_stdout
+from app.utils.logging_setup import configure_logging
 
 
 def _parse_args() -> argparse.Namespace:
@@ -76,11 +78,14 @@ def run_api() -> None:
             "download) — do this only on a trusted network. See "
             "README → Security."
         )
+    # log_config=None: uvicorn keeps our single root logging configuration, so
+    # its access/error records pass through the token-redaction filter too.
     uvicorn.run(
         create_app(),
         host=settings.host,
         port=settings.port,
         log_level="info",
+        log_config=None,
     )
 
 
@@ -98,6 +103,7 @@ def run_bot() -> None:
 
 def main() -> None:
     ensure_utf8_stdout()
+    configure_logging()
     args = _parse_args()
     try:
         if args.api:
@@ -124,6 +130,16 @@ def main() -> None:
     except ValueError as exc:
         # Invalid security-sensitive configuration — fail fast, no secrets.
         print(f"❌ Invalid configuration: {exc}")
+        raise SystemExit(1) from None
+    except (sqlite3.Error, OSError) as exc:
+        # Unusable DATABASE_PATH (e.g. a directory, a read-only location, a
+        # missing drive): fail fast with an actionable line instead of a
+        # traceback. The database path is configuration, not a secret.
+        print(
+            f"❌ Cannot open the SQLite database at "
+            f"{get_settings().database_path}: {exc}"
+        )
+        print("   Check DATABASE_PATH in .env — see README → Troubleshooting.")
         raise SystemExit(1) from None
 
 
